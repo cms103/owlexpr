@@ -1,0 +1,209 @@
+# Embedding Owlexpr
+
+Expression languages can be used in a large variety of ways, everything from simple business rules through spreadsheet style calculations to complex data mapping.
+
+To better support this range of use cases, Owlexpr provides a number of options for how it can work within an application.
+
+## The Environment
+
+Starting with this example:
+
+```go
+env := map[string]any{}
+
+// Error handling removed for readability
+ourProgram, _ := owlexpr.Compile(expression)
+ourMachine, _ := owlexpr.NewVM(stdlib.All())
+result, _ := ourMachine.Run(ourProgram, env)
+```
+
+What the expression can access depends on what you place into the env map.
+
+### Environment Functions
+
+A function, e.g. `env["getGreeting"] = func(args ...any) string { return "Hello" }`, can then be called in the expression `getGreeting()`.
+
+Functions aren't limited to the `func(args ...any) T` shape above - any Go function signature works, since calls are dispatched through reflection. Arguments are converted to the parameter types the function expects where possible (e.g. an `int64` literal into a `func(int)` parameter), so a normally-typed function is usually the more convenient choice:
+
+```go
+env["getCustomer"] = func(customerID string) (*Customer, error) {
+    if customerID == "" {
+        return nil, errors.New("getCustomer requires a customer ID")
+    }
+    return customerRecord(customerID), nil
+}
+```
+
+Is used in an expression as `getCustomer("1234")`.
+
+Return values follow a fixed convention: no return values yields `nil`; a single `error`-typed return signals success/failure only; a single other value is returned as-is; two or more return values where the last is `error` are treated as `(value, error)`, same as `getCustomer` above; any other combination just returns the first value.
+
+The reflection-based argument conversion above also applies when the expected parameter type is itself a function - a callback. If a struct in the environment has a method that takes a function as one of its arguments, a lambda written in the expression can be passed straight in for it, and owlexpr bridges the call automatically.
+
+For example, given this Go type:
+
+```go
+type Item struct {
+    Name   string
+    Active bool
+}
+
+type Items []Item
+
+func (its Items) Filter(pred func(Item) bool) []Item {
+    var out []Item
+    for _, it := range its {
+        if pred(it) {
+            out = append(out, it)
+        }
+    }
+    return out
+}
+```
+
+placed into the environment as `env["items"] = someItems`, the expression `items.Filter(x => x.Active)` works with no extra setup: `x => x.Active` is a owlexpr lambda, not a Go value, but because `Filter`'s parameter is `func(Item) bool`, owlexpr wraps the lambda in an adapter of that exact type before calling `Filter` - so from `Filter`'s point of view it received an ordinary `func(Item) bool`, and calls it the same way it would any other. This works for a callback parameter on any struct method or environment function, not just this example.
+
+### Data
+
+Any Go type can be placed into an Environment and accessed by the expression. Typically these are slices, arrays, maps, structs, pointers to structs as well as basic types like string, int, float64.
+
+The default slice type used by Owlexpr is []any and the default map type is map[string]any. Any other slice, array or map type can be used.
+
+### Struct Methods
+
+By default any methods that are on structs which are accessible through the environment will be callable from the expression. For example:
+
+```go
+type Customer struct { ... }
+
+func (c *Customer) GetName() string {
+    return c.Name
+}
+
+env["customer"] = &Customer{ ... }
+```
+
+The expression will be able to call `customer.GetName()`.
+
+This is often exactly what you'd want, however there can be circumstances where structs carry methods that are not intended to be available to the authors of the expression (for example a method that mutates the struct).
+
+Disable struct method calling by passing the vm.DisableStructMethods() option when creating the VM, e.g. `owlexpr.NewVM(stdlib.All(), vm.DisableStructMethods())`.
+
+### Iterators
+
+Iterators (or functions that return iterators) can be passed through the environment and used by expressions through the [iter.*](STDLIB.md#iter) package.
+
+When iterators are used in an expression, they will typically consume the iterator to process its data. They can also be used to build a processing pipeline and return it to the embedding application:
+
+```go
+env := map[string]any{}
+env["myiter"] = slices.Values([]any{1, 2, 3, 4})
+
+ourProgram, _ := owlexpr.Compile("iter.map(myiter, x => x * 2)")
+ourMachine, _ := owlexpr.NewVM(stdlib.All())
+
+// result is now a Seq
+result, _ := ourMachine.Run(ourProgram, env)
+resultSeq := result.(iter.Seq[any])
+
+for val := range resultSeq {
+    fmt.Printf("Value: %v\n", val)
+}
+```
+This will output:
+```
+Value: 2
+Value: 4
+Value: 6
+Value: 8
+```
+
+The use of iterators in this fashion is probably limited to use cases where a large volume of data records need to be processed and keeping them in a slice would be wasteful.
+
+Note: The returned Iterator is not safe for concurrent use by multiple goroutines or for concurrent use with the Machine that created it.
+
+#### Error Handling
+
+Pipeline stages like `iter.map` and `iter.filter` return a plain `iter.Seq[any]` closure, which has no way to return an `error` alongside each value. If the lambda passed to a stage fails when called - for example a type error inside `x => x * 2` - the stage `panic`s with an `error` value instead.
+
+When the expression itself calls a terminal operation such as `iter.reduce` or `iter.toList`, that panic is recovered internally and surfaced normally as the `error` returned from `Run`. But when `Run` returns an undriven `Seq` for the embedder to consume later, as in the example above, `Run` has already returned successfully by the time the embedder starts ranging over it - there is nothing left on the call stack to recover the panic. This means a failure encountered while consuming the `Seq` will panic out of the embedder's `for range` loop (or out of a callback invocation, if the `Seq` is driven that way):
+
+```go
+func consume(seq iter.Seq[any]) (err error) {
+    defer func() {
+        if r := recover(); r != nil {
+            if e, ok := r.(error); ok {
+                err = e
+                return
+            }
+            panic(r) // not an owlexpr error - a real bug, don't swallow it
+        }
+    }()
+
+    for val := range seq {
+        fmt.Printf("Value: %v\n", val)
+    }
+    return nil
+}
+```
+
+Only recover an `error`-typed panic value and re-panic anything else, mirroring the convention owlexpr itself uses internally - a non-`error` panic means something has gone wrong outside of expression evaluation, and swallowing it would hide a real bug.
+
+### Callable Results
+
+An expression can itself evaluate to a function rather than a plain value, e.g. an expression that compiles a piece of reusable logic for the embedder to call repeatedly with different inputs. When the final result is a lambda literal, `Run` automatically converts it into an ordinary Go func the embedder can call directly, with no owlexpr-internal type involved:
+
+```go
+ourProgram, _ := owlexpr.Compile("x => x * 2")
+result, _ := ourMachine.Run(ourProgram, env)
+
+double := result.(func(...any) (any, error))
+out, _ := double(int64(21)) // out == int64(42)
+```
+
+Note: The returned callable is not safe for concurrent use by multiple goroutines or for concurrent use with the Machine that created it.
+
+## Minimal Use Case
+
+Expressions can be used for very simple business rule evaluation, e.g. should this order get free shipping: `customer.IsVIP || order.value > 1000`.
+
+When the expression evaluation is being done against simple, flat data like this, there's no need to provide complex capabilities from the standard library or even the [builtin functions](LANGUAGE.md#built-in-functions).
+
+Creating the Machine without the `stdlib.All()` option leaves out the standard library, and the option `vm.DisableBuiltIns()` results in just the core language, with no functions provided.
+
+## Partial standard library
+
+The standard library is fairly broad and includes capabilities that most business users would never need (e.g. `bytes`, `iter`, `json`, `bits`). When calling `NewVM()`, instead of passing `stdlib.All()`, you can select which packages should be made available:
+
+| Function            | Namespace   | Covers                                                      |
+| ------------------- | ----------- | ----------------------------------------------------------- |
+| `StringBuiltins()`  | `string.*`  | String manipulation                                         |
+| `ListBuiltins()`    | `list.*`    | List/map processing (map, filter, reduce, sort, ...)        |
+| `TimeBuiltins()`    | `time.*`    | Times and durations                                         |
+| `DecimalBuiltins()` | `decimal.*` | Arbitrary precision numbers                                 |
+| `IterBuiltins()`    | `iter.*`    | Lazy, push-iterator pipelines (see [Iterators](#iterators)) |
+| `ByteBuiltins()`    | `bytes.*`   | Byte/byte-slice conversion and manipulation                 |
+| `BitsBuiltins()`    | `bits.*`    | Bitwise operations                                          |
+| `JSONBuiltins()`    | `json.*`    | JSON encode/decode                                          |
+
+`StringBuiltins()` and `ListBuiltins()` will be the most broadly useful, along with `TimeBuiltins()` for handling times and durations and `DecimalBuiltins()` for arbitrary precision numbers.
+
+Each is an independent `vm.VMOption`, so pass as many as you need, e.g. `owlexpr.NewVM(stdlib.StringBuiltins(), stdlib.ListBuiltins())`.
+
+## Type Coercion
+
+By default, Owlexpr will coerce types so that expression authors do not need to spend time learning about them. For example: `decimal.decimal("3.50") + 4 + 6.7` will evaluate to a Decimal result of 14.2, without the user needing to explicitly cast one or more operands to decimal.
+
+If your use case for Owlexpr is very sensitive to the types being used, you can disable this coercion by passing `vm.DisableAutoTypeCoercion()`. To disable or change what type coercion is supported on a type-by-type basis, or even selectively remove / change operators, see [extending Owlexpr](EXTEND.md#starting-from-a-clean-slate).
+
+## Concurrency
+
+A `*vm.Machine` is not safe for concurrent use - `Run`/`RunScopes` mutate unsynchronized state on the Machine itself, so two goroutines must not share one. A compiled program (the `[]vm.Instruction` returned by `owlexpr.Compile`) has no such restriction: it's immutable once built, so it's safe to compile once and share across goroutines, each running it through its own `*Machine` (built with the same `vm.VMOption`s passed to `NewVM`).
+
+`*Machine` is relatively cheap to create, so just build one per-goroutine. Note: It is not safe to pass labmda or iterators created in one Machine to another running in a different goroutine.
+
+## Adding new builtin functions and types
+
+The standard library is implemented entirely using the same public interfaces available to embedding applications - there's nothing `stdlib` can do that your own code can't, whether that's a new function like `math.double()` or teaching the VM's operators about a Go type of your own.
+
+See [EXTEND.md](EXTEND.md) for a full walkthrough, from the simplest builtin through to registering new operators.
