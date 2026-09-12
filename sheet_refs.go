@@ -25,7 +25,7 @@ func sheetReferences(expr Expr) map[string]bool {
 
 func collectSheetReferences(expr Expr, bound map[string]bool, refs map[string]bool) {
 	switch n := expr.(type) {
-	case NumberNode, StringNode, BoolNode:
+	case NumberNode, StringNode, BoolNode, NilNode:
 		// leaves, no sub-expressions
 
 	case VarNode:
@@ -54,6 +54,22 @@ func collectSheetReferences(expr Expr, bound map[string]bool, refs map[string]bo
 			return
 		}
 		collectSheetReferences(n.Expr, bound, refs)
+
+	case OptMemberAccessNode:
+		// sheet is always a non-nil map (RunSheet injects it fresh per
+		// cell, even when a cell has zero dependencies), so `sheet?.x`
+		// behaves exactly like `sheet.x` at runtime - accessMember still
+		// runs and still needs x's dependency edge recorded, the ?.
+		// short-circuit only ever fires here for a genuinely nil target.
+		if v, ok := n.Expr.(VarNode); ok && v.Name == sheetNamespace && !bound[sheetNamespace] {
+			refs[n.Member] = true
+			return
+		}
+		collectSheetReferences(n.Expr, bound, refs)
+
+	case OptIndexNode:
+		collectSheetReferences(n.Target, bound, refs)
+		collectSheetReferences(n.Index, bound, refs)
 
 	case TernaryNode:
 		collectSheetReferences(n.Cond, bound, refs)

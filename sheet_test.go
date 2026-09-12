@@ -266,6 +266,68 @@ func TestSheetResultMapWrapsLambdaCellAsCallableFunc(t *testing.T) {
 	}
 }
 
+// TestSheetOptMemberAccessRecordsDependency is a regression test: `?.`
+// anywhere inside a cell used to panic sheetReferences, because
+// OptMemberAccessNode had no case in its AST walk (sheet_refs.go) and fell
+// through to the "unhandled node type" default. b is declared before a, so
+// this also confirms sheet.a?.field records the same dependency edge
+// sheet.a.field would - sheet is never nil (RunSheet injects it fresh per
+// cell), so the ?. can only ever matter for the field, never for reaching
+// the right cell first.
+func TestSheetOptMemberAccessRecordsDependency(t *testing.T) {
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "b", Expression: `sheet.a?.field ?? "default"`},
+		{Name: "a", Expression: `{"field": "value"}`},
+	})
+	if err != nil {
+		t.Fatalf("CompileSheet: %v", err)
+	}
+	if sheet.cells[0].name != "a" || sheet.cells[1].name != "b" {
+		t.Fatalf("expected topo order [a, b], got [%s, %s]", sheet.cells[0].name, sheet.cells[1].name)
+	}
+	res := runSheetT(t, map[string]any{}, []CellDef{
+		{Name: "a", Expression: `{"field": "value"}`},
+		{Name: "b", Expression: `sheet.a?.field ?? "default"`},
+	})
+	if res["b"] != "value" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestSheetOptMemberAccessShortCircuitsOnNilTarget(t *testing.T) {
+	res := runSheetT(t, map[string]any{}, []CellDef{
+		{Name: "a", Expression: "nil"},
+		{Name: "b", Expression: `sheet.a?.field ?? "default"`},
+	})
+	if res["b"] != "default" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestSheetOptIndexDoesNotPanic covers OptIndexNode (target?.[index]), the
+// other AST node sheetReferences was missing a case for.
+func TestSheetOptIndexDoesNotPanic(t *testing.T) {
+	res := runSheetT(t, map[string]any{}, []CellDef{
+		{Name: "a", Expression: "[1, 2, 3]"},
+		{Name: "b", Expression: "sheet.a?.[0]"},
+	})
+	if res["b"] != int64(1) {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestSheetNilLiteralDoesNotPanic covers NilNode, also missing a case in
+// sheetReferences - any cell containing a bare `nil` literal panicked too.
+func TestSheetNilLiteralDoesNotPanic(t *testing.T) {
+	res := runSheetT(t, map[string]any{}, []CellDef{
+		{Name: "a", Expression: "nil"},
+		{Name: "b", Expression: `sheet.a ?? "default"`},
+	})
+	if res["b"] != "default" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
 func TestSheetEmptyIsError(t *testing.T) {
 	if _, err := CompileSheet(nil); err == nil {
 		t.Fatal("expected an error for an empty sheet, got none")
