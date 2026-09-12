@@ -1,5 +1,10 @@
 # Owlexpr - Flexible expression evaluation in Go
 
+[![CI](https://github.com/cms103/owlexpr/actions/workflows/ci.yml/badge.svg)](https://github.com/cms103/owlexpr/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cms103/owlexpr.svg)](https://pkg.go.dev/github.com/cms103/owlexpr)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cms103/owlexpr)](https://goreportcard.com/report/github.com/cms103/owlexpr)
+[![License](https://img.shields.io/github/license/cms103/owlexpr.svg)](LICENSE)
+
 Owlexpr is a high-performance flexible expression language, written in Go. It's designed to be easy to use for business analysts and configurers writing the expressions and flexible for software engineers to bake into their software.
 
 ## An Introduction to Expression Languages
@@ -119,6 +124,17 @@ func main() {
 ## Background and motivation
 
 Owlexpr is heavily inspired by the excellent expr package, but with an emphasis on flexibility and extensability. It's been designed to be heavily configurable at only a modest cost to performance, using a VM for execution speed.
+
+### How owlexpr differs from expr
+
+[expr-lang/expr](https://github.com/expr-lang/expr) is a mature, widely-adopted expression evaluator (used by Google Cloud, Uber, Argo, and others) and a strong default choice - it offers static type-checking against your Go types at compile time, which owlexpr does not. Owlexpr trades that for a different set of trade-offs, most useful if you need one of:
+
+* **Multi-expression Sheets** - a set of named, interdependent expressions (`sheet.<name>`) resolved and evaluated in dependency order automatically, similar to a spreadsheet's cells, rather than one expression in, one value out.
+* **Deep extensibility** - custom builtin functions and custom types are first-class extension points, down to being able to strip the language to a minimal core with no builtins at all.
+* **Arbitrary-precision decimals and a dedicated byte type** built into the standard library, for money/financial calculations and fixed-width binary record handling without hand-rolled conversions.
+* **Namespaced standard library** (`string.*`, `list.*`, `time.*`, `bytes.*`) to keep the global function surface small as it grows.
+
+If you just need to evaluate a single boolean/config expression against Go structs with compile-time type safety, expr is likely the better starting point. If you're modelling interdependent calculations (pricing, underwriting, spreadsheet-like config) or need to bend the language itself to your domain, owlexpr is built for that.
 
 ## Main capabilities
 
