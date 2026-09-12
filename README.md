@@ -61,6 +61,8 @@ func main() {
 }
 ```
 
+▶ [Run this on the Go Playground](https://go.dev/play/p/AzNBes15Y4u)
+
 `Compile` turns the expression text into a reusable set of instructions; `NewVM` creates a reusable machine to run them against. `env` is just a `map[string]any` - any Go value can go in it, from plain scalars to structs and slices. See [EMBED.md](docs/EMBED.md) for everything that can go into `env` and how the VM can be configured.
 
 ### A sheet
@@ -108,6 +110,8 @@ func main() {
 	fmt.Println("total:", out["total"])       // total: 99
 }
 ```
+
+▶ [Run this on the Go Playground](https://go.dev/play/p/QNu2Y2-sjqZ)
 
 `total` is derived from `discount`, which is derived from `subtotal` - `CompileSheet` works that ordering out from the `sheet.*` references itself, and `RunSheet` returns every cell's result, not just the last one, so a caller can inspect `subtotal`/`discount` individually rather than only seeing the final `total`.
 
