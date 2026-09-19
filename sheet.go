@@ -1,18 +1,25 @@
 package owlexpr
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/cms103/owlexpr/vm"
 )
 
+// defaultSheetNamespace is the namespace CompileSheet uses when the caller
+// doesn't pass a Namespace option.
+const defaultSheetNamespace = "sheet"
+
 // CellDef is one named expression going into a Sheet: Expression may
 // reference any other cell in the same Sheet via `sheet.<name>` (see
-// sheetNamespace), in addition to whatever env/builtins it would normally
-// see as a standalone expression. A bare `<name>` never reaches a cell,
-// even one named identically - only the `sheet.` form does, deliberately,
-// so a cell can never silently shadow or be shadowed by an env variable.
+// sheetReferences, sheet_refs.go - "sheet" is the default namespace; pass
+// the Namespace SheetOption to CompileSheet to use a different one), in
+// addition to whatever env/builtins it would normally see as a standalone
+// expression. A bare `<name>` never reaches a cell, even one named
+// identically - only the namespaced form does, deliberately, so a cell can
+// never silently shadow or be shadowed by an env variable.
 type CellDef struct {
 	Name       string
 	Expression string
@@ -42,7 +49,57 @@ type compiledCell struct {
 // single expression string. cells is stored in resolved (dependency-first)
 // order.
 type Sheet struct {
-	cells []compiledCell
+	cells     []compiledCell
+	namespace string
+}
+
+type SheetOption func(*Sheet) error
+
+// Namespace overrides the reserved identifier CompileSheet/RunSheet use for
+// cross-cell references (`<namespace>.<name>`) - "sheet" by default (see
+// defaultSheetNamespace). name must lex as a single identifier and must not
+// be a language keyword (if, else, let, true, false, nil, and, or, in, not,
+// matches): the lexer tokenizes those as something other than TokIdent (an
+// operator, a boolean literal, ...), so no cell expression could ever spell
+// a reference through a namespace named after one.
+//
+// Choosing a name that collides with a builtin namespace registered on the
+// Machine RunSheet is later called with (e.g. "string", "json") can't be
+// checked here - CompileSheet has no Machine to check against - and will
+// silently shadow that builtin for every cell in the sheet, since
+// env/cellScope lookup takes priority over builtins (see OpLoad, vm/vm.go).
+// Pick a name unlikely to collide with any namespace your builtins
+// register.
+func Namespace(name string) SheetOption {
+	return func(s *Sheet) error {
+		if err := validateNamespaceName(name); err != nil {
+			return err
+		}
+		s.namespace = name
+		return nil
+	}
+}
+
+// validateNamespaceName reports whether name can ever actually appear as
+// `name.x` in a cell expression: it must lex as exactly one identifier
+// token, not a language keyword (which lexes as some other token type
+// entirely) and not multiple tokens (e.g. "my-name", "a b", or a name
+// starting with a digit). Reusing the real lexer here, rather than
+// maintaining a separate hand-picked keyword list, keeps this in sync with
+// the grammar automatically as it grows.
+func validateNamespaceName(name string) error {
+	if name == "" {
+		return errors.New("compile sheet: namespace must not be empty")
+	}
+	lex := NewLexer(name)
+	tok := lex.NextToken()
+	if tok.Type != TokIdent || tok.Val != name {
+		return fmt.Errorf("compile sheet: namespace %q is not a valid identifier, or is a reserved word", name)
+	}
+	if next := lex.NextToken(); next.Type != TokEOF {
+		return fmt.Errorf("compile sheet: namespace %q is not a valid identifier", name)
+	}
+	return nil
 }
 
 // CompileSheet parses and compiles every cell, statically resolves the
@@ -52,9 +109,19 @@ type Sheet struct {
 // direct self-reference) - all at build time, not per RunSheet call. The
 // result is reusable across many RunSheet calls, the same way
 // []vm.Instruction is reusable across many Run calls.
-func CompileSheet(cells []CellDef) (*Sheet, error) {
+func CompileSheet(cells []CellDef, options ...SheetOption) (*Sheet, error) {
 	if len(cells) == 0 {
 		return nil, fmt.Errorf("compile sheet: no cells provided")
+	}
+
+	sheet := &Sheet{
+		cells:     make([]compiledCell, 0, len(cells)),
+		namespace: defaultSheetNamespace,
+	}
+	for _, opt := range options {
+		if err := opt(sheet); err != nil {
+			return nil, err
+		}
 	}
 
 	names := make(map[string]bool, len(cells))
@@ -77,11 +144,11 @@ func CompileSheet(cells []CellDef) (*Sheet, error) {
 
 	deps := make(map[string][]string, len(cells))
 	for _, cell := range cells {
-		refs := sheetReferences(asts[cell.Name])
+		refs := sheetReferences(asts[cell.Name], sheet.namespace)
 		var cellDeps []string
 		for name := range refs {
 			if !names[name] {
-				return nil, fmt.Errorf("cell %q: sheet.%s references a cell that does not exist", cell.Name, name)
+				return nil, fmt.Errorf("cell %q: %s.%s references a cell that does not exist", cell.Name, sheet.namespace, name)
 			}
 			cellDeps = append(cellDeps, name)
 		}
@@ -100,7 +167,7 @@ func CompileSheet(cells []CellDef) (*Sheet, error) {
 	// "name" was already appended, and so already has an entry here,
 	// before "name" itself is processed below.
 	nameToIndex := make(map[string]int, len(cells))
-	sheet := &Sheet{cells: make([]compiledCell, 0, len(cells))}
+
 	for _, name := range order {
 		c := &compiler{}
 		c.compile(asts[name])
@@ -236,8 +303,8 @@ func joinCycle(names []string) string {
 // caller an ordinary callable Go func instead of owlexpr's internal
 // closure representation.
 func RunSheet(mc *vm.Machine, sheet *Sheet, env map[string]any) (map[string]any, error) {
-	if _, exists := env[sheetNamespace]; exists {
-		return nil, fmt.Errorf("run sheet: env already defines %q, which collides with the reserved cell-reference namespace", sheetNamespace)
+	if _, exists := env[sheet.namespace]; exists {
+		return nil, fmt.Errorf("run sheet: env already defines %q, which collides with the reserved cell-reference namespace", sheet.namespace)
 	}
 
 	results := make([]any, len(sheet.cells))
@@ -247,7 +314,7 @@ func RunSheet(mc *vm.Machine, sheet *Sheet, env map[string]any) (map[string]any,
 		for _, dep := range cell.deps {
 			depsMap[dep.name] = results[dep.index]
 		}
-		cellScope := map[string]any{sheetNamespace: depsMap}
+		cellScope := map[string]any{sheet.namespace: depsMap}
 		val, err := mc.RunScopes(cell.instructions, []map[string]any{env, cellScope})
 		if err != nil {
 			return nil, fmt.Errorf("cell %q: %w", cell.name, err)

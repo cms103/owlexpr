@@ -333,3 +333,192 @@ func TestSheetEmptyIsError(t *testing.T) {
 		t.Fatal("expected an error for an empty sheet, got none")
 	}
 }
+
+func TestSheetCustomNamespaceResolvesCrossCellRefs(t *testing.T) {
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "a", Expression: "base + 1"},
+		{Name: "b", Expression: "cell.a + 1"},
+	}, Namespace("cell"))
+	if err != nil {
+		t.Fatalf("CompileSheet: %v", err)
+	}
+	if len(sheet.cells[1].deps) != 1 || sheet.cells[1].deps[0].name != "a" {
+		t.Fatalf("expected b to depend on a via the custom namespace, got %+v", sheet.cells[1].deps)
+	}
+	mc, err := NewVM()
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	res, err := RunSheet(mc, sheet, map[string]any{"base": int64(10)})
+	if err != nil {
+		t.Fatalf("RunSheet: %v", err)
+	}
+	if res["a"] != int64(11) || res["b"] != int64(12) {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestSheetCustomNamespaceLeavesDefaultNameFree is the actual payoff of
+// making the namespace configurable: with a custom namespace in play, a
+// cell (or an env var) can be named "sheet" with no collision at all, since
+// "sheet" is no longer the reserved name - the same freedom the default
+// "sheet" namespace already gives every other name.
+func TestSheetCustomNamespaceLeavesDefaultNameFree(t *testing.T) {
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "sheet", Expression: "41"},
+		{Name: "b", Expression: "cell.sheet + 1"},
+	}, Namespace("cell"))
+	if err != nil {
+		t.Fatalf("CompileSheet: %v", err)
+	}
+	mc, err := NewVM()
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	res, err := RunSheet(mc, sheet, map[string]any{})
+	if err != nil {
+		t.Fatalf("RunSheet: %v", err)
+	}
+	if res["sheet"] != int64(41) || res["b"] != int64(42) {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestSheetDefaultNamespaceStillReservedWithoutOption confirms the
+// zero-option path is unchanged: bare "sheet" in env still collides exactly
+// as it did before Namespace existed.
+func TestSheetDefaultNamespaceStillReservedWithoutOption(t *testing.T) {
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "a", Expression: "1"},
+	})
+	if err != nil {
+		t.Fatalf("CompileSheet: %v", err)
+	}
+	mc, err := NewVM()
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	if _, err := RunSheet(mc, sheet, map[string]any{"sheet": "oops"}); err == nil {
+		t.Fatal("expected an error when env already defines \"sheet\", got none")
+	}
+}
+
+func TestSheetCustomNamespaceEnvCollisionIsError(t *testing.T) {
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "a", Expression: "1"},
+	}, Namespace("cell"))
+	if err != nil {
+		t.Fatalf("CompileSheet: %v", err)
+	}
+	mc, err := NewVM()
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	if _, err := RunSheet(mc, sheet, map[string]any{"cell": "oops"}); err == nil {
+		t.Fatal("expected an error when env already defines the custom namespace \"cell\", got none")
+	}
+	// And the old default name is no longer special at all under a custom
+	// namespace - env can freely define "sheet" now.
+	if _, err := RunSheet(mc, sheet, map[string]any{"sheet": "fine now"}); err != nil {
+		t.Fatalf("RunSheet: %v", err)
+	}
+}
+
+// TestSheetNamespaceRejectsLanguageKeywords covers every keyword the lexer
+// recognizes (parser.go's readIdent) - each one lexes as something other
+// than a plain identifier, so a namespace named after one could never
+// actually be spelled as `<namespace>.<name>` in a cell expression. This is
+// a regression test: an earlier version of this check only rejected
+// "and"/"or"/"in"/"not"/"matches" (and only via a case-insensitive
+// comparison against upper-cased keywords, which doesn't match anything
+// real since the language's keywords are lower-case and case-sensitive),
+// missing "if"/"else"/"let"/"true"/"false"/"nil" entirely.
+func TestSheetNamespaceRejectsLanguageKeywords(t *testing.T) {
+	for _, kw := range []string{"if", "else", "let", "true", "false", "nil", "and", "or", "in", "not", "matches"} {
+		if _, err := CompileSheet([]CellDef{{Name: "a", Expression: "1"}}, Namespace(kw)); err == nil {
+			t.Errorf("Namespace(%q): expected an error, got none", kw)
+		}
+	}
+}
+
+// TestSheetNamespaceCaseSensitivity documents that keyword rejection is
+// case-sensitive, matching the language itself - the lexer only recognizes
+// lower-case keywords (parser.go's readIdent switches on exact string
+// matches), so e.g. "And" or "AND" lex as ordinary identifiers and are
+// legitimate namespace names, while "and" does not.
+func TestSheetNamespaceCaseSensitivity(t *testing.T) {
+	if _, err := CompileSheet([]CellDef{{Name: "a", Expression: "1"}}, Namespace("And")); err != nil {
+		t.Fatalf("Namespace(\"And\"): expected no error, got %v", err)
+	}
+	if _, err := CompileSheet([]CellDef{{Name: "a", Expression: "1"}}, Namespace("and")); err == nil {
+		t.Fatal("Namespace(\"and\"): expected an error, got none")
+	}
+}
+
+// TestSheetNamespaceRejectsNonIdentifiers covers namespace names that would
+// never lex as a single identifier token at all - each would make
+// `<namespace>.<name>` either a parse error or silently not what the caller
+// intended, so CompileSheet should reject them up front instead.
+func TestSheetNamespaceRejectsNonIdentifiers(t *testing.T) {
+	for _, name := range []string{"", "my-sheet", "my sheet", "1sheet", "sheet.x", "shee$t"} {
+		if _, err := CompileSheet([]CellDef{{Name: "a", Expression: "1"}}, Namespace(name)); err == nil {
+			t.Errorf("Namespace(%q): expected an error, got none", name)
+		}
+	}
+}
+
+func TestSheetNamespaceAcceptsOrdinaryIdentifiers(t *testing.T) {
+	for _, name := range []string{"cell", "row", "_sheet", "sheet2", "Sheet"} {
+		if _, err := CompileSheet([]CellDef{{Name: "a", Expression: "1"}}, Namespace(name)); err != nil {
+			t.Errorf("Namespace(%q): expected no error, got %v", name, err)
+		}
+	}
+}
+
+// TestSheetNamespaceCollidesWithUnrelatedBuiltinCall documents a known
+// limitation (see Namespace's doc comment, sheet.go): CompileSheet has no
+// Machine to check a chosen namespace against, so nothing stops a caller
+// from picking a name that collides with a registered builtin namespace
+// like "string". sheetReferences has no way to tell "string.trim" used as
+// the stdlib call apart from "string.trim" meaning "the cell named trim" -
+// it statically treats every `<namespace>.<name>` as the latter, so a cell
+// merely calling string.trim(...) is treated as depending on a cell named
+// "trim" that was never meant to exist here, and CompileSheet rejects it
+// with a confusing "references a cell that does not exist" error that has
+// nothing to do with the actual mistake (choosing "string" as the
+// namespace).
+func TestSheetNamespaceCollidesWithUnrelatedBuiltinCall(t *testing.T) {
+	_, err := CompileSheet([]CellDef{
+		{Name: "a", Expression: `string.trim("  hi  ")`},
+	}, Namespace("string"))
+	if err == nil {
+		t.Fatal("expected an error from the \"string\" namespace colliding with the string.trim() builtin call, got none")
+	}
+	if !strings.Contains(err.Error(), "trim") {
+		t.Fatalf("got: %v", err)
+	}
+}
+
+// TestSheetNamespaceShadowsBuiltinNamespaceAtRuntime is the sharper form of
+// the same limitation: when a cell named "trim" does legitimately exist,
+// CompileSheet has no reason to object, but at runtime OpLoad resolves
+// "string" against the sheet's own injected depsMap before ever consulting
+// the Machine's builtins (see OpLoad, vm/vm.go) - so string.trim(...) calls
+// the *cell's* value, not the stdlib function, and fails because that value
+// isn't callable.
+func TestSheetNamespaceShadowsBuiltinNamespaceAtRuntime(t *testing.T) {
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "trim", Expression: "1"},
+		{Name: "a", Expression: `string.trim("  hi  ")`},
+	}, Namespace("string"))
+	if err != nil {
+		t.Fatalf("CompileSheet: %v", err)
+	}
+	mc, err := NewVM()
+	if err != nil {
+		t.Fatalf("NewVM: %v", err)
+	}
+	if _, err := RunSheet(mc, sheet, map[string]any{}); err == nil {
+		t.Fatal("expected the builtin \"string\" namespace to be shadowed by the \"trim\" cell and fail, got no error")
+	}
+}
