@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/cms103/owlexpr/actions/workflows/ci.yml/badge.svg)](https://github.com/cms103/owlexpr/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/cms103/owlexpr.svg)](https://pkg.go.dev/github.com/cms103/owlexpr)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cms103/owlexpr)](https://goreportcard.com/report/github.com/cms103/owlexpr)
 [![License](https://img.shields.io/github/license/cms103/owlexpr.svg)](LICENSE)
 
 Owlexpr is a high-performance flexible expression language, written in Go. It's designed to be easy to use for business analysts and configurers writing the expressions and flexible for software engineers to bake into their software.
