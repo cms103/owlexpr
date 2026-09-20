@@ -50,6 +50,7 @@ var namespacedListFuncs = map[string]vm.BuiltinFunc{
 	"reverse":       reverseListFunc,
 	"flatten":       flattenFunc,
 	"concat":        concatFunc,
+	"zip":           zipFunc,
 	"uniq":          uniqFunc,
 	"keys":          keysFunc,
 	"values":        valuesFunc,
@@ -574,6 +575,44 @@ func concatFunc(mc *vm.Machine, args ...any) (any, error) {
 			return nil, fmt.Errorf("concat(): argument %d must be a list, got %T", i+1, arg)
 		}
 		out = append(out, elems...)
+	}
+	return out, nil
+}
+
+// zipFunc pairs up corresponding elements from two or more lists into a
+// list of tuples, e.g. zip([1, 2, 3], ["a", "b", "c"]) ->
+// [[1, "a"], [2, "b"], [3, "c"]]. Each tuple is a plain []any, the same
+// representation owlexpr uses for every other list here, so a tuple can be
+// indexed (t[0], t[1], ...) or destructured with map/sortBy/etc. like any
+// other list.
+//
+// Like Python's zip, the result is only as long as the shortest input
+// list - trailing elements of any longer list are simply dropped rather
+// than padded with nil, so the caller never has to guard against a nil
+// partner value.
+func zipFunc(mc *vm.Machine, args ...any) (any, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("zip() expects at least 2 arguments, got %d", len(args))
+	}
+	lists := make([][]any, len(args))
+	length := -1
+	for i, arg := range args {
+		elems, ok := owlexpr.ListElements(arg)
+		if !ok {
+			return nil, fmt.Errorf("zip(): argument %d must be a list, got %T", i+1, arg)
+		}
+		lists[i] = elems
+		if length == -1 || len(elems) < length {
+			length = len(elems)
+		}
+	}
+	out := make([]any, length)
+	for i := 0; i < length; i++ {
+		tuple := make([]any, len(lists))
+		for j, l := range lists {
+			tuple[j] = l[i]
+		}
+		out[i] = tuple
 	}
 	return out, nil
 }

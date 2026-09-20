@@ -103,6 +103,7 @@ Turned on with `ListBuiltins()`, used as `list.*`.
 | `reverse(list)` | A new list with the items in reverse order. | `reverse([1, 2, 3])` → `[3, 2, 1]` |
 | `flatten(list)` | Flattens a list of lists (however deeply nested) into one plain list. | `flatten([[1, 2], [3, [4, 5]]])` → `[1, 2, 3, 4, 5]` |
 | `concat(list1, list2, ...)` | Joins any number of lists together, end to end. | `concat([1, 2], [3, 4])` → `[1, 2, 3, 4]` |
+| `zip(list1, list2, ...)` | Pairs up the items at each position across two or more lists into tuples. Stops at the shortest list. | `zip([1, 2, 3], ["a", "b", "c"])` → `[[1, "a"], [2, "b"], [3, "c"]]` |
 | `uniq(list)` | A new list with duplicate items removed, keeping the first of each. | `uniq([1, 2, 2, 3, 1])` → `[1, 2, 3]` |
 | `keys(map)` | The map's keys, as a list. | `keys({a: 1, b: 2})` → `["a", "b"]` (in no particular order) |
 | `values(map)` | The map's values, as a list. | `values({a: 1, b: 2})` → `[1, 2]` (in no particular order) |

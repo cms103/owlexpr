@@ -249,6 +249,51 @@ func TestReverseListFlattenConcat(t *testing.T) {
 	}
 }
 
+func TestZip(t *testing.T) {
+	got := evalList(t, nil, `list.zip([1, 2, 3], ["a", "b", "c"])`)
+	want := []any{
+		[]any{int64(1), "a"},
+		[]any{int64(2), "b"},
+		[]any{int64(3), "c"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("list.zip() = %v, want %v", got, want)
+	}
+}
+
+// TestZipThreeLists covers more than two lists at once.
+func TestZipThreeLists(t *testing.T) {
+	got := evalList(t, nil, `list.zip([1, 2], [3, 4], [5, 6])`)
+	want := []any{
+		[]any{int64(1), int64(3), int64(5)},
+		[]any{int64(2), int64(4), int64(6)},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("list.zip() = %v, want %v", got, want)
+	}
+}
+
+// TestZipStopsAtShortest confirms zip follows Python's convention of
+// truncating to the shortest input list rather than padding with nil.
+func TestZipStopsAtShortest(t *testing.T) {
+	got := evalList(t, nil, `list.zip([1, 2, 3], ["a", "b"])`)
+	want := []any{
+		[]any{int64(1), "a"},
+		[]any{int64(2), "b"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("list.zip() = %v, want %v", got, want)
+	}
+}
+
+func TestZipRequiresAtLeastTwoLists(t *testing.T) {
+	evalListExpectError(t, nil, `list.zip([1, 2])`)
+}
+
+func TestZipRejectsNonList(t *testing.T) {
+	evalListExpectError(t, nil, `list.zip([1, 2], "not a list")`)
+}
+
 func TestUniq(t *testing.T) {
 	got := evalList(t, nil, `list.uniq([1, 2, 2, 3, 1, 3, 3])`)
 	if !reflect.DeepEqual(got, []any{int64(1), int64(2), int64(3)}) {
