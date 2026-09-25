@@ -53,8 +53,9 @@ func foldConstants(node Expr) Expr {
 		// eliminate here, so operands are still recursed into (a folded
 		// operand still helps whatever consumes it) but the node itself
 		// is never folded. "matches"' right side must stay a literal
-		// StringNode for the compiler's own regex-literal check, which
-		// it already structurally is - nothing to fold there either.
+		// StringNode (or RegexNode) for the compiler's own compile-time
+		// regex handling, which it already structurally is - nothing to
+		// fold there either.
 		// "in"'s right side is typically a list, not a foldable scalar.
 		case "&&", "and", "||", "or", "??", "in", "matches":
 			n.Left = foldConstants(n.Left)

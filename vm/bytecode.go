@@ -43,12 +43,14 @@ const (
 	// Like OpIn, it's not part of the operationsRouter/Combine dispatch -
 	// there's no third-party type that would ever want to extend "what can
 	// appear on the right of matches" the way numeric types extend +/-.
-	// Its right-hand operand is always a *regexp.Regexp already: the
-	// compiler requires a string-literal pattern and compiles it once, at
-	// Compile() time, embedding the resulting *regexp.Regexp directly as
-	// an OpPush constant (see compiler.go) - so there is no runtime regex
-	// compilation and no cache to manage. A dynamic (non-literal) pattern
-	// is a compile-time error, not a slower runtime path.
+	// Its right-hand operand must be a *Regex, compiled before Run ever
+	// starts: a string or regex literal pattern is compiled once, at
+	// Compile() time, and embedded directly as an OpPush constant (see
+	// compiler.go); any other right-hand expression must evaluate to a
+	// *Regex value (a let-bound regex literal, an env value built with
+	// NewRegex). So there is no runtime regex compilation and no cache to
+	// manage - a plain string reaching OpMatches at run time is an error,
+	// not a slower runtime-compiled path.
 	OpMatches
 	// Control Flow Jump Instructions
 	OpJumpIfFalse

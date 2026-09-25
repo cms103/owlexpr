@@ -157,7 +157,8 @@ func roundFunc(mc *vm.Machine, args ...any) (any, error) {
 // with `==`/`?.`/`??`, which already treat it as nil the same way. The
 // next six cases match GetTypeCode's own core set plus the two literal
 // collection types ([]any/map[string]any) - zero reflection, same fast
-// path lenFunc uses. vm.IsCallable comes next so a lambda closure reports
+// path lenFunc uses - plus *vm.Regex, reported as "regex" (the value a
+// re`...` literal produces) rather than its Go pointer type name. vm.IsCallable comes next so a lambda closure reports
 // as "function" rather than leaking its unexported *vm.closure Go type
 // name. Anything else (a struct from the env, decimal.Decimal, time.Time,
 // a non-nil pointer, ...) falls back to reflect: Slice/Array/Map are
@@ -195,6 +196,8 @@ func typeFunc(mc *vm.Machine, args ...any) (any, error) {
 		return "list", nil
 	case map[string]any:
 		return "map", nil
+	case *vm.Regex:
+		return "regex", nil
 	}
 	if vm.IsCallable(v) {
 		return "function", nil

@@ -73,7 +73,7 @@ type SheetOption func(*Sheet) error
 func Namespace(name string) SheetOption {
 	return func(s *Sheet) error {
 		if err := validateNamespaceName(name); err != nil {
-			return err
+			return fmt.Errorf("compile sheet: %w", err)
 		}
 		s.namespace = name
 		return nil
@@ -89,15 +89,15 @@ func Namespace(name string) SheetOption {
 // the grammar automatically as it grows.
 func validateNamespaceName(name string) error {
 	if name == "" {
-		return errors.New("compile sheet: namespace must not be empty")
+		return errors.New("namespace must not be empty")
 	}
 	lex := NewLexer(name)
 	tok := lex.NextToken()
 	if tok.Type != TokIdent || tok.Val != name {
-		return fmt.Errorf("compile sheet: namespace %q is not a valid identifier, or is a reserved word", name)
+		return fmt.Errorf("namespace %q is not a valid identifier, or is a reserved word", name)
 	}
 	if next := lex.NextToken(); next.Type != TokEOF {
-		return fmt.Errorf("compile sheet: namespace %q is not a valid identifier", name)
+		return fmt.Errorf("namespace %q is not a valid identifier", name)
 	}
 	return nil
 }
@@ -144,7 +144,10 @@ func CompileSheet(cells []CellDef, options ...SheetOption) (*Sheet, error) {
 
 	deps := make(map[string][]string, len(cells))
 	for _, cell := range cells {
-		refs := sheetReferences(asts[cell.Name], sheet.namespace)
+		refs, err := sheetReferences(asts[cell.Name], sheet.namespace)
+		if err != nil {
+			return nil, fmt.Errorf("cell %q: %w", cell.Name, err)
+		}
 		var cellDeps []string
 		for name := range refs {
 			if !names[name] {

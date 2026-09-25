@@ -216,11 +216,16 @@ operator. A few are worth calling out:
   past the "else" branch. An `if` with no `else` compiles an implicit
   `OpPush nil` for the missing branch, so the instruction shape is identical
   either way.
-- **`matches`' right-hand side must be a string literal.** The compiler
-  compiles it into a real `*regexp.Regexp` once, at compile time, embedded
-  directly as an `OpPush` constant — there is no runtime `regexp.Compile`
-  call and nothing to cache. A non-literal pattern is a compile-time error
-  rather than a slower dynamic path.
+- **Regexes are only ever compiled at compile time.** A regex literal
+  (`` re`...` ``, `RegexNode`) - or a string literal on the right of
+  `matches` - is compiled once, by the compiler, into a `*vm.Regex`
+  embedded directly as an `OpPush` constant. There is no runtime
+  `regexp.Compile` call anywhere (not in `matches`, not in `regex.*`) and
+  so nothing to cache. A non-literal `matches` right-hand side compiles
+  normally but must evaluate to a `*vm.Regex`; a string there is a runtime
+  error rather than a slower dynamic path. `*vm.Regex` wraps
+  `*regexp.Regexp` rather than being one so that expressions can't reach
+  `Longest()`, which would mutate the shared constant.
 - **Variable references resolve to one of two instructions** depending on
   whether the compiler can prove, from the lexical structure of the source
   alone, that the name is bound by an enclosing `let` or lambda parameter:
@@ -481,6 +486,8 @@ string, generalized to many expressions with dependencies between them.
   shadowed by, an `env` variable of the same name. This scan is
   `let`/lambda-aware: a local binding literally named `sheet` shadows the
   reserved namespace inside its own scope, the same as any other name would.
+  The same scan is exported as `SheetReferences` for hosts that build their
+  own dependency graphs.
 - `CompileSheet` builds the dependency graph from those references,
   topologically sorts it (`topoSortCells`, DFS postorder — visiting a cell's
   dependencies before appending the cell itself), and rejects duplicate
@@ -564,7 +571,7 @@ must never crash the host process" as a hard requirement. Concretely:
 | `compiler.go` | AST → `[]vm.Instruction` |
 | `builtin_funcs.go` | The always-on core builtins (`len`, `map`, `filter`, `reduce`, ...) |
 | `vm_config.go` | Root's `NewVM` wrapper (injects core builtins as the default `VMOption`) |
-| `sheet.go`, `sheet_refs.go` | `Sheet`/`CellDef`/`CompileSheet`/`RunSheet` |
+| `sheet.go`, `sheet_refs.go` | `Sheet`/`CellDef`/`CompileSheet`/`RunSheet`, `SheetReferences` |
 | `vm/vm.go` | `Machine`, `pump` (the interpreter loop), `Combine`, closures, reflection-based call/access |
 | `vm/reusable_call.go` | `ReusableCall`/`NewReusableCall` - the allocation-reusing call surface `map`/`filter`/`reduce`, `list.*`, and `iter.*` share |
 | `vm/bytecode.go` | `OpCode` enum, instruction `Arg` payload types (`LocalRef`, `LambdaProto`, ...) |
@@ -572,5 +579,6 @@ must never crash the host process" as a hard requirement. Concretely:
 | `vm/typecode.go` | `TypeCode`, `GetTypeCode`, core/dynamic code ranges |
 | `vm/iteration.go` | List/map/iterator source recognition (`ForEachListElement`, `ForEachSeqElement`, ...) |
 | `vm/in.go`, `vm/coalesce.go`, `vm/matches.go` | `in`, `??`/`?.`'s nil test, `matches` |
+| `vm/regex.go` | `Regex` - the compiled-regex value `` re`...` `` produces (`NewRegex`, `CompileRegex`, `RegexpOf`) |
 | `vm/vm_config.go` | `VMOption` constructors (`RegisterOperation`, `RegisterTypeCoder`, ...) |
 | `stdlib/*.go` | Opt-in builtin packs |

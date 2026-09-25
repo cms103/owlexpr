@@ -162,12 +162,10 @@ func TestReflectFuncAdapterMultipleNonErrorOutputs(t *testing.T) {
 		{Op: OpPush, Arg: int64(2)},
 		{Op: OpMul},
 	}
-	// callFunction's return convention takes only the first return value
-	// when there's no trailing error, so only the first output is
-	// observable via mc.Run's result - the test still confirms this runs
-	// to completion (the second output was zeroed, not left as garbage
-	// that would trip reflect's own zero-value invariants) rather than
-	// panicking.
+	// callReflectFunc returns two non-error results as a list, so both
+	// outputs are observable: the lambda's result fills the first, and the
+	// second must come back zeroed (not left as garbage that would trip
+	// reflect's own zero-value invariants).
 	instructions := []Instruction{
 		{Op: OpLoad, Arg: "hostFunc"},
 		lambdaClosureInstructions(body),
@@ -177,8 +175,9 @@ func TestReflectFuncAdapterMultipleNonErrorOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if got != int64(8) {
-		t.Errorf("hostFunc(x => x * 2) = %v, want 8", got)
+	list, ok := got.([]any)
+	if !ok || len(list) != 2 || list[0] != int64(8) || list[1] != int64(0) {
+		t.Errorf("hostFunc(x => x * 2) = %v (%T), want [8 0]", got, got)
 	}
 }
 

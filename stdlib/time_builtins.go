@@ -3,6 +3,7 @@ package stdlib
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/cms103/owlexpr/vm"
@@ -53,6 +54,8 @@ func TimeBuiltins() vm.VMOption {
 		// looking like ordinary integer comparison. Year()/Day()/Hour()/
 		// Minute()/Second() all return plain int and already work via the
 		// existing default int<->int64 coercion - no registration needed.
+		// time.month(t)/time.weekday(t) sidestep the named types entirely
+		// for the common case, returning plain int64s.
 		if err := vm.RegisterOperation(time.Month(0), []any{int(0), int64(0)}, namedCalendarIntOperations)(mc); err != nil {
 			return err
 		}
@@ -81,6 +84,11 @@ var namespacedTimeFuncs = map[string]vm.BuiltinFunc{
 	"seconds":      secondsFunc,
 	"milliseconds": millisecondsFunc,
 	"days":         daysFunc,
+	"windows":      windowsFunc,
+	"parse":        parseFunc,
+	"format":       formatTimeFunc,
+	"month":        monthFunc,
+	"weekday":      weekdayFunc,
 }
 
 // timeDurationOperations is the single handler backing both the
@@ -354,4 +362,131 @@ func daysFunc(mc *vm.Machine, args ...any) (any, error) {
 		return nil, fmt.Errorf("days() expects 1 argument, got %d", len(args))
 	}
 	return durationScale("days", args[0], 24*time.Hour)
+}
+
+// maxWindows caps how many windows one windows() call may return, since
+// the count is size/slide and both can come from expression input: a
+// day-long window sliding by a millisecond would otherwise try to build
+// 86.4 million of them.
+const maxWindows = 10000
+
+// unixEpoch is the alignment point for windows(), matching Spark's
+// window() - not Go's Truncate, which aligns to year 1 and so disagrees
+// for sizes that don't evenly divide a day (e.g. 7-day windows).
+var unixEpoch = time.Unix(0, 0)
+
+// windowsFunc: time.windows(t, size[, slide[, offset]]) returns the start
+// of every window of length size, sliding by slide (default: size, i.e.
+// tumbling windows), that contains t - oldest first. Windows are aligned
+// to the Unix epoch shifted by offset (default 0), so the same arguments
+// always produce the same boundaries whatever t is, and a window [start,
+// start+size) contains t when start <= t < start+size. The starts keep
+// t's time zone.
+//
+// offset is Spark's startTime / Flink's offset: epoch alignment matches
+// both (and so keeps results identical for jobs ported from them), but
+// puts 7-day windows on Thursdays (1970-01-01's weekday) at 00:00 UTC -
+// offset is how to move that to e.g. Monday (days(4)) or a local
+// midnight. Only its remainder modulo slide matters, so any duration,
+// negative included, is accepted rather than Spark's 0 <= offset < slide.
+func windowsFunc(mc *vm.Machine, args ...any) (any, error) {
+	if len(args) < 2 || len(args) > 4 {
+		return nil, fmt.Errorf("windows() expects 2 to 4 arguments, got %d", len(args))
+	}
+	t, ok := args[0].(time.Time)
+	if !ok {
+		return nil, fmt.Errorf("windows(): argument 1 must be a time value, got %T", args[0])
+	}
+	size, ok := args[1].(time.Duration)
+	if !ok {
+		return nil, fmt.Errorf("windows(): argument 2 (size) must be a duration, got %T", args[1])
+	}
+	slide := size
+	if len(args) >= 3 {
+		if slide, ok = args[2].(time.Duration); !ok {
+			return nil, fmt.Errorf("windows(): argument 3 (slide) must be a duration, got %T", args[2])
+		}
+	}
+	var shift time.Duration
+	if len(args) == 4 {
+		if shift, ok = args[3].(time.Duration); !ok {
+			return nil, fmt.Errorf("windows(): argument 4 (offset) must be a duration, got %T", args[3])
+		}
+	}
+	if size <= 0 || slide <= 0 {
+		return nil, fmt.Errorf("windows(): size and slide must be positive, got %v and %v", size, slide)
+	}
+	// Same rule as Spark: a slide longer than the window would leave gaps
+	// that belong to no window at all.
+	if slide > size {
+		return nil, fmt.Errorf("windows(): slide (%v) must not be longer than size (%v)", slide, size)
+	}
+	count := (size + slide - 1) / slide
+	if count > maxWindows {
+		return nil, fmt.Errorf("windows(): size %v with slide %v would give %d windows per time, more than the limit of %d", size, slide, count, maxWindows)
+	}
+
+	// Drop any monotonic clock reading (from time.now()) so the starts
+	// are plain wall-clock times.
+	t = t.Round(0)
+	// Sub saturates rather than overflowing, outside roughly 1678-2262.
+	sinceEpoch := t.Sub(unixEpoch)
+	if sinceEpoch == math.MaxInt64 || sinceEpoch == math.MinInt64 {
+		return nil, fmt.Errorf("windows(): time %v is out of range", t)
+	}
+	// rem is how far t is past the latest window boundary, i.e.
+	// (sinceEpoch - shift) mod slide - computed from the two remainders
+	// separately, each normalized into [0, slide), so nothing can overflow
+	// however large shift or sinceEpoch are.
+	rem := floorMod(sinceEpoch, slide) - floorMod(shift, slide)
+	if rem < 0 {
+		rem += slide
+	}
+	// latest is the start of the newest window containing t; each earlier
+	// one is a slide further back, for as long as it still reaches t.
+	latest := t.Add(-rem)
+	var starts []time.Time
+	for start := latest; t.Sub(start) < size; start = start.Add(-slide) {
+		starts = append(starts, start)
+	}
+	out := make([]any, len(starts))
+	for i, s := range starts {
+		out[len(starts)-1-i] = s
+	}
+	return out, nil
+}
+
+// floorMod is a mod m normalized into [0, m), for m > 0.
+func floorMod(a, m time.Duration) time.Duration {
+	r := a % m
+	if r < 0 {
+		r += m
+	}
+	return r
+}
+
+// monthFunc: time.month(t) -> 1-12, as a plain int64 rather than Go's
+// named time.Month type.
+func monthFunc(mc *vm.Machine, args ...any) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("month() expects 1 argument, got %d", len(args))
+	}
+	t, ok := args[0].(time.Time)
+	if !ok {
+		return nil, fmt.Errorf("month(): argument must be a time value, got %T", args[0])
+	}
+	return int64(t.Month()), nil
+}
+
+// weekdayFunc: time.weekday(t) -> 0 (Sunday) to 6 (Saturday), as a plain
+// int64 - the same numbering as Go's time.Weekday and strftime's %w.
+func weekdayFunc(mc *vm.Machine, args ...any) (any, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("weekday() expects 1 argument, got %d", len(args))
+	}
+	t, ok := args[0].(time.Time)
+	if !ok {
+		return nil, fmt.Errorf("weekday(): argument must be a time value, got %T", args[0])
+	}
+	return int64(t.Weekday()), nil
 }

@@ -15,6 +15,13 @@ type NumberNode struct{ Value any }
 type StringNode struct{ Value string }
 type BoolNode struct{ Value bool }
 
+// RegexNode is a regex literal: re`pattern`. Pattern is the raw source
+// text between the backticks - no escape processing at all, so `\d` means
+// what it means to the regex engine without the double-escaping a string
+// literal would need. The compiler compiles it once, at Compile() time,
+// into a *vm.Regex constant (an invalid pattern is a compile error).
+type RegexNode struct{ Pattern string }
+
 // NilNode is the "nil" literal. It carries no fields - there's only one
 // nil - and compiles to the same OpPush(nil) any other literal does.
 type NilNode struct{}
@@ -151,6 +158,10 @@ const (
 	TokElse
 	TokLet
 	TokNil
+	TokRegex
+	// TokIllegal is a lexing error (e.g. an unterminated regex literal),
+	// with the message in Val - surfaced as a parse error by parsePrefix.
+	TokIllegal
 )
 
 type Token struct {
@@ -381,6 +392,14 @@ func (l *Lexer) readIdent() Token {
 	}
 	val := string(l.input[start:l.pos])
 
+	// `re` immediately followed by a backtick opens a regex literal. A
+	// backtick has no other meaning in the language, so this never
+	// changes how any previously valid expression lexes - `re` on its
+	// own is still an ordinary identifier.
+	if val == "re" && l.pos < len(l.input) && l.input[l.pos] == '`' {
+		return l.readRegex()
+	}
+
 	switch val {
 	case "if":
 		return Token{Type: TokIf, Val: val}
@@ -399,6 +418,27 @@ func (l *Lexer) readIdent() Token {
 	default:
 		return Token{Type: TokIdent, Val: val}
 	}
+}
+
+// readRegex reads the body of a regex literal (re`...`), starting at its
+// opening backtick. The body is raw - backslashes are passed through
+// untouched for the regex engine to interpret - so it can't contain a
+// backtick itself (match one with \x60). Unlike readString, a missing
+// closing delimiter is an error rather than consuming to EOF: a regex
+// silently extended to the end of the input would match something quite
+// different from what was written.
+func (l *Lexer) readRegex() Token {
+	l.pos++ // consume opening backtick
+	start := l.pos
+	for l.pos < len(l.input) && l.input[l.pos] != '`' {
+		l.pos++
+	}
+	if l.pos >= len(l.input) {
+		return Token{Type: TokIllegal, Val: "unterminated regex literal: missing closing '`'"}
+	}
+	pattern := string(l.input[start:l.pos])
+	l.pos++ // consume closing backtick
+	return Token{Type: TokRegex, Val: pattern, Literal: pattern}
 }
 
 func isIdentStart(ch rune) bool {
@@ -729,6 +769,14 @@ func (p *PrattParser) parsePrefix() (Expr, error) {
 		s := StringNode{Value: p.curToken.Literal.(string)}
 		p.nextToken()
 		return s, nil
+
+	case TokRegex:
+		r := RegexNode{Pattern: p.curToken.Literal.(string)}
+		p.nextToken()
+		return r, nil
+
+	case TokIllegal:
+		return nil, fmt.Errorf("%s", p.curToken.Val)
 
 	case TokBool:
 		b := BoolNode{Value: p.curToken.Literal.(bool)}
@@ -1113,6 +1161,9 @@ func Parse(input string) (Expr, error) {
 	// stray operator, or the second half of a malformed "1+-2" - see the
 	// lexer note on twoCharOps) would be silently discarded instead of
 	// reported as the parse error they are.
+	if parser.curToken.Type == TokIllegal {
+		return nil, fmt.Errorf("%s", parser.curToken.Val)
+	}
 	if parser.curToken.Type != TokEOF {
 		return nil, fmt.Errorf("unexpected trailing token %q after expression", parser.curToken.Val)
 	}

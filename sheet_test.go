@@ -522,3 +522,62 @@ func TestSheetNamespaceShadowsBuiltinNamespaceAtRuntime(t *testing.T) {
 		t.Fatal("expected the builtin \"string\" namespace to be shadowed by the \"trim\" cell and fail, got no error")
 	}
 }
+
+// TestSheetIndexAccessRecordsDependency is a regression test: `sheet["a"]`
+// (and `sheet?.["a"]`) used to create no dependency edge, so the cell's
+// dependency map never contained "a" and every run failed with `key "a"
+// not found` - even with "a" declared first.
+func TestSheetIndexAccessRecordsDependency(t *testing.T) {
+	res := runSheetT(t, map[string]any{}, []CellDef{
+		{Name: "b", Expression: `sheet["a"] + 1`},
+		{Name: "c", Expression: `sheet?.["a"] * 10`},
+		{Name: "d", Expression: `sheet["some" + "thing"]`}, // constant-folded key
+		{Name: "a", Expression: "1"},
+		{Name: "something", Expression: `"x"`},
+	})
+	if res["b"] != int64(2) || res["c"] != int64(10) || res["d"] != "x" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestSheetIndexAccessCompileTimeChecks: once `sheet["a"]` is a real
+// reference, CompileSheet catches the same mistakes it does for `sheet.a`
+// - an unknown cell and a cycle - instead of each failing at run time.
+func TestSheetIndexAccessCompileTimeChecks(t *testing.T) {
+	cases := map[string][]CellDef{
+		"unknown cell": {{Name: "a", Expression: `sheet["nope"]`}},
+		"cycle":        {{Name: "a", Expression: `sheet["b"]`}, {Name: "b", Expression: "sheet.a"}},
+	}
+	for name, cells := range cases {
+		if _, err := CompileSheet(cells); err == nil {
+			t.Errorf("%s: expected a CompileSheet error, got none", name)
+		}
+	}
+}
+
+// TestSheetComputedIndexIsError: `sheet[k]` can't be resolved statically,
+// and at run time a cell only sees its static dependencies, so it could
+// never work - CompileSheet rejects it rather than letting it fail on
+// every run.
+func TestSheetComputedIndexIsError(t *testing.T) {
+	for _, expr := range []string{`sheet[k]`, `sheet?.[k]`, `sheet["a" + k]`} {
+		_, err := CompileSheet([]CellDef{
+			{Name: "a", Expression: "1"},
+			{Name: "b", Expression: expr},
+		})
+		if err == nil || !strings.Contains(err.Error(), "constant string") {
+			t.Errorf("%s: err = %v, want a constant-string error", expr, err)
+		}
+	}
+}
+
+// TestSheetShadowedNamespaceIndexIsNotReference: indexing a local binding
+// that shadows the namespace is ordinary indexing, computed key or not.
+func TestSheetShadowedNamespaceIndexIsNotReference(t *testing.T) {
+	res := runSheetT(t, map[string]any{"k": "x"}, []CellDef{
+		{Name: "a", Expression: `let sheet = {x: 5}; sheet[k] + sheet["x"]`},
+	})
+	if res["a"] != int64(10) {
+		t.Fatalf("got %+v", res)
+	}
+}

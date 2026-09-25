@@ -253,7 +253,7 @@ func TestDecimalSliceIteration(t *testing.T) {
 	}
 }
 
-// TestDecimalDecimalConvertsFromOtherTypes covers the decimal.decimal()
+// TestDecimalDecimalConvertsFromOtherTypes covers the decimal()
 // builtin (decimalFunc), which uses CoercValue/OpCoerce to convert an
 // int/int64/float64/string into a decimal.Decimal - the "converting from
 // something else to decimal" branch of decimalOperations' OpCoerce case.
@@ -263,11 +263,11 @@ func TestDecimalDecimalConvertsFromOtherTypes(t *testing.T) {
 		expr string
 		want string
 	}{
-		{"decimal.decimal(5)", "5"},
-		{"decimal.decimal(i)", "2"},
-		{"decimal.decimal(i64)", "3"},
-		{"decimal.decimal(f)", "1.5"},
-		{"decimal.decimal(s)", "12.34"},
+		{"decimal(5)", "5"},
+		{"decimal(i)", "2"},
+		{"decimal(i64)", "3"},
+		{"decimal(f)", "1.5"},
+		{"decimal(s)", "12.34"},
 	}
 	for _, c := range cases {
 		got := evalDecimal(t, env, c.expr)
@@ -282,28 +282,35 @@ func TestDecimalDecimalConvertsFromOtherTypes(t *testing.T) {
 	}
 }
 
-// TestDecimalDecimalIdentity covers decimal.decimal() applied to a value
+// TestDecimalDecimalIdentity covers decimal() applied to a value
 // that's already a decimal.Decimal - the aType == bType fast path in
 // operationDispatcher.
 func TestDecimalDecimalIdentity(t *testing.T) {
 	env := map[string]any{"amount": decimal.NewFromFloat(10.5)}
-	got := evalDecimal(t, env, "decimal.decimal(amount)")
+	got := evalDecimal(t, env, "decimal(amount)")
 	d, ok := got.(decimal.Decimal)
 	if !ok || !d.Equal(decimal.NewFromFloat(10.5)) {
-		t.Errorf("decimal.decimal(amount) = %v (%T), want decimal 10.5", got, got)
+		t.Errorf("decimal(amount) = %v (%T), want decimal 10.5", got, got)
 	}
 }
 
 // TestDecimalDecimalInvalidStringErrors covers decimalFunc's error
 // propagation from decimal.NewFromString for a malformed string argument.
 func TestDecimalDecimalInvalidStringErrors(t *testing.T) {
-	evalDecimalExpectError(t, nil, `decimal.decimal("not a number")`)
+	evalDecimalExpectError(t, nil, `decimal("not a number")`)
+}
+
+// TestDecimalDecimalNamespaceRemoved: decimal() replaced
+// decimal.decimal() - `decimal` is now the function itself, not a
+// namespace, so the old spelling is member access on a function.
+func TestDecimalDecimalNamespaceRemoved(t *testing.T) {
+	evalDecimalExpectError(t, nil, `decimal.decimal(1)`)
 }
 
 // TestDecimalDecimalArgumentCount covers decimalFunc's own arity guard.
 func TestDecimalDecimalArgumentCount(t *testing.T) {
-	evalDecimalExpectError(t, nil, `decimal.decimal()`)
-	evalDecimalExpectError(t, nil, `decimal.decimal(1, 2)`)
+	evalDecimalExpectError(t, nil, `decimal()`)
+	evalDecimalExpectError(t, nil, `decimal(1, 2)`)
 }
 
 // TestDecimalToIntInt64Float64 covers the reverse direction - converting a
@@ -342,5 +349,34 @@ func TestDecimalFastSliceIterateDirect(t *testing.T) {
 
 	if ok := decimalFastSliceIterate([]int64{1, 2, 3}, func(v any) bool { return true }); ok {
 		t.Error("decimalFastSliceIterate should report ok=false for a []int64")
+	}
+}
+
+// TestDecimalExponentIsUsable covers a Go method returning an int32
+// (decimal.Decimal.Exponent): the VM normalises it to int64 at the call
+// boundary, while a method returning a registered type (Decimal itself)
+// is left alone.
+func TestDecimalExponentIsUsable(t *testing.T) {
+	env := map[string]any{"amount": decimal.RequireFromString("12.345")}
+	if got := evalDecimal(t, env, "amount.Exponent()"); got != int64(-3) {
+		t.Errorf("amount.Exponent() = %v (%T), want int64(-3)", got, got)
+	}
+	if got := evalDecimal(t, env, "-amount.Exponent() + 1"); got != int64(4) {
+		t.Errorf("-amount.Exponent() + 1 = %v (%T), want int64(4)", got, got)
+	}
+	if got, ok := evalDecimal(t, env, "amount.Neg()").(decimal.Decimal); !ok || !got.Equal(decimal.RequireFromString("-12.345")) {
+		t.Errorf("amount.Neg() = %v (%T), want decimal.Decimal -12.345", got, got)
+	}
+}
+
+// TestDecimalQuoRemReturnsList covers a two-result Decimal method: the
+// VM returns [quotient, remainder] rather than just the quotient.
+func TestDecimalQuoRemReturnsList(t *testing.T) {
+	env := map[string]any{"d": decimal.RequireFromString("12.345"), "e": decimal.NewFromInt(2)}
+	if got, ok := evalDecimal(t, env, "d.QuoRem(e, 0)[1]").(decimal.Decimal); !ok || !got.Equal(decimal.RequireFromString("0.345")) {
+		t.Errorf("d.QuoRem(e, 0)[1] = %v (%T), want 0.345", got, got)
+	}
+	if got := evalDecimal(t, env, "d.Float64()[1]"); got != false {
+		t.Errorf("d.Float64()[1] = %v (%T), want false (12.345 isn't exact as a float64)", got, got)
 	}
 }

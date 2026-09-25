@@ -20,18 +20,19 @@ wrong.
 
 1. [A few things that apply everywhere below](#a-few-things-that-apply-everywhere-below)
 2. [string](#string) — working with text
-3. [list](#list) — working with lists
-4. [time](#time) — dates and times
-5. [decimal](#decimal) — exact numbers for money and similar values
-6. [bytes](#bytes) — raw binary data
-7. [iter](#iter) — working through very large amounts of data piece by piece
-8. [json](#json) — converting to and from JSON text
-9. [bits](#bits) — using a number as a set of on/off flags
+3. [regex](#regex) — pulling pieces out of text with patterns
+4. [list](#list) — working with lists
+5. [time](#time) — dates and times
+6. [decimal](#decimal) — exact numbers for money and similar values
+7. [bytes](#bytes) — raw binary data
+8. [iter](#iter) — working through very large amounts of data piece by piece
+9. [json](#json) — converting to and from JSON text
+10. [bits](#bits) — using a number as a set of on/off flags
 
 ## A few things that apply everywhere below
 
 **Some functions produce values you can't type directly.** A handful of
-functions below (`decimal.decimal(...)`, `time.now()`, and others) produce
+functions below (`decimal(...)`, `time.now()`, and others) produce
 values — an exact decimal amount, a point in time, a piece of raw binary
 data — that don't have their own typing in an expression the way `42` or
 `"hello"` do. You get them from your data, or by calling one of these
@@ -80,8 +81,45 @@ way it would if you counted it yourself.
 | `format(template, ...values)` | Fills a template with values, in the style of a common text-formatting pattern: `%s` for text, `%d` for whole numbers. | `format("%s is %d", "Bob", 42)` → `"Bob is 42"` |
 | `toBase64(s)` / `fromBase64(s)` | Converts text to and from base64, a common way to encode text or data as plain letters and numbers so it's safe to put in places that don't allow arbitrary characters. | `toBase64("hi")` → `"aGk="` |
 
-There's no function here for matching a pattern (a "regular expression") —
-use the language's own `matches` operator for that (see LANGUAGE.md).
+To test whether text matches a pattern, use the language's own `matches`
+operator (see LANGUAGE.md). To pull pieces out of text with a pattern,
+see [regex](#regex).
+
+## regex
+
+Turned on with `RegexBuiltins()`, used as `regex.*`.
+
+A regular expression is a pattern describing some text — "one or more
+digits", "a word, then an @, then another word". These functions use one
+to find, pull out, replace or split on the parts of a string that match.
+
+Every function takes the pattern first, written as a regex literal:
+`` re`...` `` (see LANGUAGE.md). A pattern in an ordinary string won't work
+here — `regex.find("\\d+", s)` is an error; write `` regex.find(re`\d+`, s) ``.
+Because the pattern is part of the expression itself, a mistake in it is
+reported as soon as the expression is saved, not later when it runs.
+
+| Function | What it does | Example |
+|---|---|---|
+| `capture(re, s)` | The named pieces of the first match, as a map — name a piece with `(?P<name>...)`. `nil` if there's no match. | `` capture(re`(?P<user>\w+)@(?P<host>\w+)`, "me@example") `` → `{"user": "me", "host": "example"}` |
+| `captureAll(re, s)` / `captureAll(re, s, n)` | `capture` for every match (at most `n`), as a list. | `` captureAll(re`(?P<k>\w+)=(?P<v>\w+)`, "a=1 b=2") `` → `[{"k": "a", "v": "1"}, {"k": "b", "v": "2"}]` |
+| `groups(re, s)` | The first match, then each bracketed piece in order, as a list. `nil` if there's no match. | `` groups(re`(\w+)@(\w+)`, "me@example") `` → `["me@example", "me", "example"]` |
+| `find(re, s)` | The first piece of text that matches, or `nil` if none does. | `` find(re`\d+`, "room 42b") `` → `"42"` |
+| `findAll(re, s)` / `findAll(re, s, n)` | Every piece of text that matches (at most `n`), as a list — empty if none do. | `` findAll(re`\d+`, "1 and 22") `` → `["1", "22"]` |
+| `replace(re, s, with)` | Replaces every match. In `with`, `$1` or `${name}` stands for a bracketed piece of the match (`$$` for a plain `$`). `with` can also be a function, given each match and returning its replacement. | `` replace(re`(\w+)@(\w+)`, "me@example", "$2/$1") `` → `"example/me"`; `` replace(re`[a-z]+`, "ab-cd", m => string.upper(m)) `` → `"AB-CD"` |
+| `replaceLiteral(re, s, with)` | Same as `replace`, but `with` is used exactly as written — a `$` is just a `$`. | `` replaceLiteral(re`\d`, "a1", "$") `` → `"a$"` |
+| `split(re, s)` / `split(re, s, n)` | Breaks a string into a list of pieces wherever the pattern matches (into at most `n` pieces). | `` split(re`\s*,\s*`, "a , b,c") `` → `["a", "b", "c"]` |
+| `pattern(re)` | The pattern's text. | `` pattern(re`\d+`) `` → `"\d+"` |
+
+A piece of the pattern that's optional and didn't match comes back as
+`nil`, not as empty text — in `` capture(re`(?P<sign>-)?(?P<n>\d+)`, "5") ``,
+`sign` is `nil`. Since `capture` gives `nil` when nothing matches, `?.` and
+`??` combine with it naturally:
+
+```
+let m = regex.capture(re`^(?P<verb>\S+) (?P<path>\S+) HTTP/(?P<ver>.+)$`, request);
+m?.path ?? "unknown"
+```
 
 ## list
 
@@ -136,16 +174,140 @@ time (like "15 June 2024, 10:00am"), and a **duration** is a length of time
 | `date(s)` | Reads a date/time written in the common `2024-06-15T10:00:00Z` style. | `date("2024-06-15T10:00:00Z")` |
 | `date(s, layout)` | Reads a date/time written in a different, specific layout, when your data isn't in the style above. | — |
 | `date(s, layout, timezoneName)` | Same, but also says which timezone those clock numbers belong to (e.g. `"America/New_York"`). | — |
+| `parse(s, format)` | Reads a date/time using a `%`-style format (see below) — usually easier than `date`'s layouts. | `parse("15/Jun/2024:10:07:30 -0700", "%d/%b/%Y:%H:%M:%S %z")` |
+| `parse(s, format, timezoneName)` | Same, but says which timezone the clock numbers belong to when the text doesn't include an offset. | `parse("2024-06-15 10:00", "%Y-%m-%d %H:%M", "Europe/London")` |
+| `format(t, format)` | Writes a time as text using a `%`-style format. | `format(t, "%Y-%m-%dT%H")` → `"2024-06-15T10"` |
 | `timezone(t, timezoneName)` | Shows the same moment in time, but with its clock numbers adjusted for a different timezone. | `timezone(t, "America/New_York")` |
+| `month(t)` | The month as a number, 1 (January) to 12 (December). | `month(t) in [6, 7, 8]` |
+| `weekday(t)` | The day of the week as a number, 0 (Sunday) to 6 (Saturday). | `weekday(t) == 0 or weekday(t) == 6` → weekend |
+| `windows(t, size)` / `windows(t, size, slide)` / `windows(t, size, slide, offset)` | The start of every time window of length `size` that `t` falls in, oldest first, with a new window beginning every `slide` (every `size` if you leave it out, so windows don't overlap). `offset` moves where the windows begin (see below). | `windows(t, minutes(10), minutes(5))` → for 10:07, `[10:00, 10:05]` |
 
 You can compare times and durations directly with `==`, `<`, `>`, and so
 on. There's deliberately no way to add a plain number straight to a time
 (it wouldn't be clear if you meant seconds, days, or something else) — go
 through `hours(n)`/`days(n)`/etc. instead.
 
+**Windows** always line up the same way whatever time you give — a
+10-minute window starts on :00, :10, :20 and so on (counted from the start
+of 1970, UTC) — so every time in the same window gets the same start. Each
+start is itself a time, so the end is just `start + size`:
+
+```
+map(time.windows(ts, time.minutes(10), time.minutes(5)), w => {start: w, end: w + time.minutes(10)})
+```
+
+Because they're counted from 1 January 1970 — a Thursday, at midnight UTC —
+7-day windows start on Thursdays, and day-long windows start at midnight
+UTC. `offset` shifts every window start later by that much. Add 4 days to
+make weeks start on Monday, or shift days to start at a local midnight:
+
+```
+time.windows(ts, time.days(7), time.days(7), time.days(4))   // weeks from Monday 00:00 UTC
+time.windows(ts, time.days(1), time.days(1), time.hours(5))  // days from midnight at UTC-5
+```
+
+(The same counting and the same `offset` idea are used by Spark's and
+Flink's window functions, so results line up with pipelines built there.)
+
+`slide` can't be longer than `size`, and one call can give at most 10,000
+windows.
+
+**Formats for `parse` and `format`.** Each `%` code stands for one part of
+the date or time; everything else is matched or written exactly as it is.
+
+| Code | Meaning | Example |
+|---|---|---|
+| `%Y` / `%y` | Year, 4 digits / 2 digits | `2024` / `24` |
+| `%m` / `%-m` | Month number, 2 digits / no leading zero | `06` / `6` |
+| `%b` (or `%h`) / `%B` | Month name, short / full | `Jun` / `June` |
+| `%d` / `%-d` / `%e` | Day of the month, 2 digits / no leading zero / leading space | `05` / `5` / ` 5` |
+| `%j` | Day of the year, 3 digits | `157` |
+| `%a` / `%A` | Day name, short / full | `Wed` / `Wednesday` |
+| `%H` | Hour, 00–23 | `15` |
+| `%I` / `%-I` | Hour, 01–12 / no leading zero — use with `%p` | `03` / `3` |
+| `%p` | `AM` or `PM` | `PM` |
+| `%M` / `%-M` | Minute, 2 digits / no leading zero | `04` / `4` |
+| `%S` / `%-S` | Second, 2 digits / no leading zero | `09` / `9` |
+| `%f` | Microseconds, 6 digits — must come straight after a `.` or `,` | `%S.%f` → `09.250000` |
+| `%z` / `%:z` | Offset from UTC | `-0700` / `-07:00` |
+| `%Z` | Timezone abbreviation (for reading, prefer `%z`: abbreviations are ambiguous) | `CEST` |
+| `%F` | Same as `%Y-%m-%d` | `2024-06-05` |
+| `%T` | Same as `%H:%M:%S` | `15:04:09` |
+| `%D` | Same as `%m/%d/%y` | `06/05/24` |
+| `%R` | Same as `%H:%M` | `15:04` |
+| `%%` | A plain `%` | `%` |
+
+Month and day names are read in any capitalisation. A format used with
+`parse` can't contain other text that looks like part of a date — a month
+name, `AM`/`PM`, or a digit — outside its `%` codes; `parse` reports an
+error rather than risk misreading it. `format` has no such limit.
+
+### Methods on times, durations, months and weekdays
+
+As well as the `time.*` functions, times and durations have their own
+**methods**, called with a dot straight after the value: `t.Year()`,
+`d.Hours()`. The names start with a capital letter and are written
+exactly as shown. A method that gives back more than one value, such as
+`t.ISOWeek()`, gives you a list: pick the part you want with `[0]`, `[1]`,
+and so on. (Your application can switch methods off. If `t.Year()` gives a
+"member Year not found" error, that's what has happened; use the `time.*`
+functions instead.)
+
+**On a time** (`t` below):
+
+| Method | What it gives you | Example (for 10:07:30 on Saturday 15 June 2024, UTC) |
+|---|---|---|
+| `t.Year()`, `t.Day()`, `t.Hour()`, `t.Minute()`, `t.Second()`, `t.Nanosecond()` | One part of the date or time, as a whole number. | `t.Hour()` → `10` |
+| `t.YearDay()` | Day of the year, 1 to 366. | `167` |
+| `t.Month()` | The month, e.g. `June` (see below). | `t.Month() == 6` → `true` |
+| `t.Weekday()` | The day of the week, e.g. `Saturday` (see below). | `t.Weekday() == 6` → `true` |
+| `t.Add(d)` | The time `d` later (or earlier, if `d` is negative). Same as `t + d`. | `t.Add(time.hours(1))` → 11:07:30 |
+| `t.AddDate(years, months, days)` | The time moved by whole calendar years, months and days. Unlike `time.days(n)`, this follows the calendar, so adding a month to 31 January lands in early March. | `t.AddDate(0, 1, 2)` → 17 July 2024, 10:07:30 |
+| `t.Sub(u)` | The duration from `u` to `t`. Same as `t - u`. | `t.Sub(u)` |
+| `t.Before(u)`, `t.After(u)`, `t.Equal(u)` | `true` or `false`. `Equal` treats the same moment in two timezones as equal. | `t.Before(deadline)` |
+| `t.Compare(u)` | `-1` if `t` is earlier than `u`, `0` if they're the same moment, `1` if later. | — |
+| `t.IsZero()` | `true` if `t` is the empty "no time set" value. | — |
+| `t.Truncate(d)`, `t.Round(d)` | `t` rounded down, or to the nearest, whole `d`, counted from the start of year 1 (UTC). | `t.Truncate(time.hours(1))` → 10:00:00 |
+| `t.UTC()`, `t.Local()` | The same moment, with its clock numbers shown in UTC or in the server's own timezone. For any other timezone, use `time.timezone(t, name)`. | — |
+| `t.Location().String()` | The timezone's name. | `"Europe/London"` |
+| `t.Zone()` | A list of the timezone's short abbreviation and its offset from UTC in seconds. | `["BST", 3600]` for summer in London |
+| `t.ZoneBounds()` | A list of when the timezone's current rule (e.g. summer time) started and when it ends. | `[31 Mar 2024 02:00 BST, 27 Oct 2024 01:00 GMT]` for summer in London |
+| `t.ISOWeek()` | A list of the ISO 8601 year and week number (weeks start on Monday; week 1 contains the year's first Thursday). | `t.ISOWeek()` → `[2024, 24]`, so `t.ISOWeek()[1]` → `24` |
+| `t.Date()` | A list of the year, month and day. | `[2024, June, 15]` |
+| `t.Clock()` | A list of the hour, minute and second. | `[10, 7, 30]` |
+| `t.IsDST()` | `true` if daylight saving time is in effect at `t`. | — |
+| `t.Unix()`, `t.UnixMilli()`, `t.UnixMicro()`, `t.UnixNano()` | Seconds (or milliseconds, microseconds, nanoseconds) since the start of 1970, UTC. | `t.Unix()` → `1718446050` |
+| `t.String()` | The time written out in full. For your own layout, use `time.format`. | `"2024-06-15 10:07:30 +0000 UTC"` |
+
+**On a duration** (`d` below):
+
+| Method | What it gives you | Example (for 1 hour 30 minutes) |
+|---|---|---|
+| `d.Hours()`, `d.Minutes()`, `d.Seconds()` | The whole length in that unit, as a decimal-point number. | `d.Hours()` → `1.5` |
+| `d.Milliseconds()`, `d.Microseconds()`, `d.Nanoseconds()` | The whole length in that unit, as a whole number. | `d.Milliseconds()` → `5400000` |
+| `d.Truncate(m)`, `d.Round(m)` | `d` rounded down, or to the nearest, whole `m`. | `d.Round(time.hours(1))` → 2 hours |
+| `d.Abs()` | `d` without its sign, so a negative duration becomes positive. | — |
+| `d.String()` | The duration as text. | `"1h30m0s"` |
+
+**On a month or a weekday** (what `t.Month()` and `t.Weekday()` give you):
+`.String()` gives its English name, e.g. `t.Month().String()` → `"June"`.
+You can compare them with numbers — months run 1 (January) to 12, weekdays
+0 (Sunday) to 6 — but not do arithmetic on them: `t.Month() + 1` is an
+error. For a number you can calculate with, use `time.month(t)` or
+`time.weekday(t)`.
+
+Things to watch out for:
+
+- **Where a method wants a duration, give it one.** A plain number is taken
+  as nanoseconds, so `t.Add(3600)` adds 3.6 millionths of a second, not an
+  hour. Write `t.Add(time.hours(1))` or `t.Add(time.seconds(3600))`.
+- **`t.Format(layout)` uses Go's layout style** (`"2006-01-02 15:04"`), not
+  the `%` codes above. `time.format(t, "%Y-%m-%d %H:%M")` is usually easier.
+
 ## decimal
 
-Turned on with `DecimalBuiltins()`, used as `decimal.*`.
+Turned on with `DecimalBuiltins()`. Unlike the other packs, its one function
+is used on its own, with no `decimal.` in front: `decimal(...)`.
 
 Ordinary computer numbers with a decimal point (`float64`) can introduce
 tiny rounding errors — fine for most things, but not for money. This pack
@@ -154,15 +316,60 @@ cent needs to add up correctly.
 
 | Function | What it does | Example |
 |---|---|---|
-| `decimal(x)` | Converts a whole number, decimal-point number, or piece of text into an exact decimal value. | `decimal.decimal("19.99")` |
+| `decimal(x)` | Converts a whole number, decimal-point number, or piece of text into an exact decimal value. | `decimal("19.99")` |
 
 Once you have a decimal value, ordinary arithmetic (`+ - * / %`) and
 comparisons (`== < > ...`) work with it directly, and it mixes freely with
 plain numbers and numeric text: `price * quantity`, `"5" + fee`, and
 `amount > 100` all work as you'd expect, whether `amount`/`price`/`fee` came
-from `decimal.decimal(...)` or straight from your data. `abs()`, `ceil()`,
+from `decimal(...)` or straight from your data. `abs()`, `ceil()`,
 `floor()`, and `round()` all work on decimal values too. To turn a decimal
 back into an ordinary number, use `int(x)` or `float64(x)`.
+
+### Methods on decimals
+
+Decimal values also have **methods**, called with a dot straight after the
+value: `price.Round(2)`. The names start with a capital letter and are
+written exactly as shown. For everyday arithmetic and comparisons the
+operators (`+`, `<`, ...) are simpler; the methods are mostly useful for
+rounding and for turning a decimal into text. As with times, a method
+that gives back more than one value gives you a list. (Your application
+can switch methods off, in which case calling one gives a "member ... not
+found" error.)
+
+In the examples, `d` is `decimal("12.345")`.
+
+| Method | What it gives you | Example |
+|---|---|---|
+| `d.Round(places)` | Rounded to `places` digits after the decimal point, halves rounding away from zero. A negative `places` rounds to tens, hundreds, and so on. | `d.Round(2)` → `12.35` |
+| `d.RoundBank(places)` | Same, but halves round to the nearest even digit ("banker's rounding"). | `d.RoundBank(2)` → `12.34` |
+| `d.RoundUp(places)`, `d.RoundDown(places)` | Rounded away from zero / towards zero. | `d.RoundUp(1)` → `12.4` |
+| `d.RoundCeil(places)`, `d.RoundFloor(places)` | Rounded up / down (towards positive / negative infinity). | `d.RoundFloor(1)` → `12.3` |
+| `d.RoundCash(interval)` | Rounded to a cash interval in hundredths: `5`, `10`, `25`, `50` or `100`. | `d.RoundCash(5)` → `12.35` |
+| `d.Truncate(places)` | Cut off after `places` digits, with no rounding. | `d.Truncate(1)` → `12.3` |
+| `d.Floor()`, `d.Ceil()` | Rounded down / up to a whole number. | `d.Ceil()` → `13` |
+| `d.StringFixed(places)` | Rounded and written as text with exactly `places` digits after the point, adding zeros if needed. `d.StringFixedBank(places)` and `d.StringFixedCash(interval)` round as `RoundBank` and `RoundCash` do. | `decimal("5").StringFixed(2)` → `"5.00"` |
+| `d.String()` | The decimal as text. | `"12.345"` |
+| `d.IntPart()` | The whole-number part, with the fraction dropped. | `12` |
+| `d.InexactFloat64()` | An ordinary decimal-point number (may be slightly inexact). Same as `float64(d)`. | `12.345` |
+| `d.Float64()` | A list of that same number and whether it's exactly equal to `d`. | `[12.345, false]` |
+| `d.Neg()`, `d.Abs()` | Sign flipped / sign removed. | `d.Neg()` → `-12.345` |
+| `d.Sign()` | `-1`, `0` or `1`, depending on whether `d` is negative, zero or positive. | `1` |
+| `d.IsPositive()`, `d.IsNegative()`, `d.IsZero()`, `d.IsInteger()` | `true` or `false`. | `d.IsInteger()` → `false` |
+| `d.Add(x)`, `d.Sub(x)`, `d.Mul(x)`, `d.Div(x)`, `d.Mod(x)` | The same as `+ - * / %`. | `d.Mul(decimal(2))` → `24.69` |
+| `d.DivRound(x, places)` | Divided by `x`, rounded to `places` digits. | `d.DivRound(decimal(3), 2)` → `4.12` |
+| `d.QuoRem(x, places)` | A list of the quotient, cut off after `places` digits, and what's left over. | `d.QuoRem(decimal(2), 0)` → `[6, 0.345]` |
+| `d.Pow(x)`, `d.PowInt32(n)` | `d` raised to the power `x` (a decimal) or `n` (a whole number). | `d.PowInt32(2)` → `152.399025` |
+| `d.Equal(x)`, `d.LessThan(x)`, `d.LessThanOrEqual(x)`, `d.GreaterThan(x)`, `d.GreaterThanOrEqual(x)` | The same as `== < <= > >=`. | — |
+| `d.Cmp(x)` | `-1`, `0` or `1`, depending on whether `d` is less than, equal to, or greater than `x`. | — |
+| `d.Shift(n)` | Moves the decimal point `n` places right (or left, if `n` is negative), i.e. multiplies by 10ⁿ. | `d.Shift(2)` → `1234.5` |
+| `d.Exponent()`, `d.CoefficientInt64()`, `d.NumDigits()` | How the value is stored: `d` equals `CoefficientInt64() × 10^Exponent()`, and `NumDigits()` counts the coefficient's digits. | `-3`, `12345`, `5` |
+
+Things to watch out for:
+
+- **Where a method wants a decimal, give it one.** `d.Add(1)` and
+  `d.GreaterThan(1)` are errors; write `d.Add(decimal(1))`, or use the
+  operator instead: `d + 1`, `d > 1`.
 
 ## bytes
 

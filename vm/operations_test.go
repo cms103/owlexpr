@@ -53,23 +53,22 @@ func TestStringComparisonOperators(t *testing.T) {
 	}
 }
 
-// TestStringConcatWithNumericTypes covers stringOperations' bVal
-// conversion switch for each numeric TypeCode it coerces from (int,
-// int64, float64) - existing tests only ever concatenated string+string.
-func TestStringConcatWithNumericTypes(t *testing.T) {
+// TestStringConcatWithNumericTypesErrors covers stringOperations
+// rejecting "+" between a string and a number: concatenation is
+// string + string only, matching number + string (which never had a
+// handler), so a mistaken "5" + 1 fails instead of silently giving "51".
+func TestStringConcatWithNumericTypesErrors(t *testing.T) {
 	mc, err := UnconfiguredVM()
 	if err != nil {
 		t.Fatalf("NewVM: %v", err)
 	}
-	env := map[string]any{"s": "n="}
-	if got := evalDyn(t, mc, env, "s", int(5), OpAdd); got != "n=5" {
-		t.Errorf(`"n=" + int(5) = %v, want "n=5"`, got)
+	env := map[string]any{"s": "n=", "x": "x"}
+	for _, n := range []any{int(5), int64(6), float64(1.5)} {
+		evalDynExpectError(t, mc, env, "s", n, OpAdd)
+		evalDynExpectError(t, mc, env, n, "s", OpAdd)
 	}
-	if got := evalDyn(t, mc, env, "s", int64(6), OpAdd); got != "n=6" {
-		t.Errorf(`"n=" + int64(6) = %v, want "n=6"`, got)
-	}
-	if got := evalDyn(t, mc, env, "s", float64(1.5), OpAdd); got != "n=1.5" {
-		t.Errorf(`"n=" + float64(1.5) = %v, want "n=1.5"`, got)
+	if got := evalDyn(t, mc, env, "s", "x", OpAdd); got != "n=x" {
+		t.Errorf(`"n=" + "x" = %v, want "n=x"`, got)
 	}
 }
 

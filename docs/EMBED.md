@@ -36,7 +36,9 @@ env["getCustomer"] = func(customerID string) (*Customer, error) {
 
 Is used in an expression as `getCustomer("1234")`.
 
-Return values follow a fixed convention: no return values yields `nil`; a single `error`-typed return signals success/failure only; a single other value is returned as-is; two or more return values where the last is `error` are treated as `(value, error)`, same as `getCustomer` above; any other combination just returns the first value.
+Return values follow a fixed convention. No return values yields `nil`, and a single `error`-typed return signals success/failure only. Otherwise a trailing `error` fails the call when it's non-nil and is set aside, and the data values left over decide the result: one value (including the usual `(value, error)`, same as `getCustomer` above) is returned as-is, and two or more come back as a list in order. So `func() (int, string)` gives `[1, "a"]`, and `t.ISOWeek()` on a `time.Time` gives `[year, week]`, which an expression can index as `t.ISOWeek()[1]`. A `(value, ok bool)` function also gives a two-element list, since the VM can't tell what the `bool` means.
+
+Each data value (including each list element) is normalised on the way back: an integer or float kind owlexpr doesn't model (e.g. the `int32` from a decimal's `Exponent()`, a `float32`, or a named type such as `type Level uint8`) is converted to `int64` or `float64`, so it works with arithmetic, comparisons and `int()`/`float64()`. Plain `int` and any type with a registered operation (e.g. `time.Duration` and `time.Month` once `TimeBuiltins` is enabled, or your own `RegisterOperation` types) are returned unchanged, as is a `uint64` value too large for `int64`.
 
 The reflection-based argument conversion above also applies when the expected parameter type is itself a function - a callback. If a struct in the environment has a method that takes a function as one of its arguments, a lambda written in the expression can be passed straight in for it, and owlexpr bridges the call automatically.
 
@@ -68,6 +70,16 @@ placed into the environment as `env["items"] = someItems`, the expression `items
 Any Go type can be placed into an Environment and accessed by the expression. Typically these are slices, arrays, maps, structs, pointers to structs as well as basic types like string, int, float64.
 
 The default slice type used by Owlexpr is []any and the default map type is map[string]any. Any other slice, array or map type can be used.
+
+Unexported struct fields are not accessible from expressions - `x.hidden` is a "member not found" error.
+
+A regular expression built in Go (for example from configuration) can be passed in as a `*vm.Regex`, and then works with `matches` and the `regex.*` functions exactly like a `` re`...` `` literal written in the expression:
+
+```go
+env["ticketId"] = vm.NewRegex(regexp.MustCompile(`^[A-Z]+-\d+$`))
+```
+
+`vm.Regex` exposes only read-only methods to expressions; don't call `Longest()` on the wrapped `*regexp.Regexp` after handing it over, as the same value is shared by every run. Expressions can't compile a pattern from a string at run time, so there's no regex cache to size or bound.
 
 ### Struct Methods
 
@@ -178,9 +190,10 @@ The standard library is fairly broad and includes capabilities that most busines
 | Function            | Namespace   | Covers                                                      |
 | ------------------- | ----------- | ----------------------------------------------------------- |
 | `StringBuiltins()`  | `string.*`  | String manipulation                                         |
+| `RegexBuiltins()`   | `regex.*`   | Regex capture, find, replace and split                      |
 | `ListBuiltins()`    | `list.*`    | List/map processing (map, filter, reduce, sort, ...)        |
 | `TimeBuiltins()`    | `time.*`    | Times and durations                                         |
-| `DecimalBuiltins()` | `decimal.*` | Arbitrary precision numbers                                 |
+| `DecimalBuiltins()` | `decimal()` | Arbitrary precision numbers                                 |
 | `IterBuiltins()`    | `iter.*`    | Lazy, push-iterator pipelines (see [Iterators](#iterators)) |
 | `ByteBuiltins()`    | `bytes.*`   | Byte/byte-slice conversion and manipulation                 |
 | `BitsBuiltins()`    | `bits.*`    | Bitwise operations                                          |
@@ -192,7 +205,7 @@ Each is an independent `vm.VMOption`, so pass as many as you need, e.g. `owlexpr
 
 ## Type Coercion
 
-By default, Owlexpr will coerce types so that expression authors do not need to spend time learning about them. For example: `decimal.decimal("3.50") + 4 + 6.7` will evaluate to a Decimal result of 14.2, without the user needing to explicitly cast one or more operands to decimal.
+By default, Owlexpr will coerce types so that expression authors do not need to spend time learning about them. For example: `decimal("3.50") + 4 + 6.7` will evaluate to a Decimal result of 14.2, without the user needing to explicitly cast one or more operands to decimal.
 
 If your use case for Owlexpr is very sensitive to the types being used, you can disable this coercion by passing `vm.DisableAutoTypeCoercion()`. To disable or change what type coercion is supported on a type-by-type basis, or even selectively remove / change operators, see [extending Owlexpr](EXTEND.md#starting-from-a-clean-slate).
 

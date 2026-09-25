@@ -52,6 +52,10 @@ func All() vm.VMOption {
 		if err != nil {
 			return err
 		}
+		err = RegexBuiltins()(mc)
+		if err != nil {
+			return err
+		}
 		err = ListBuiltins()(mc)
 		if err != nil {
 			return err

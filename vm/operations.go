@@ -46,6 +46,13 @@ func stringOperations(a, b any, aTypeCode, bTypeCode TypeCode, op OpCode) (any, 
 
 	switch op {
 	case OpAdd:
+		// Concatenation is string + string only. Implicitly stringifying
+		// a number here ("5" + 1 = "51") hid mistakes - the caller almost
+		// always meant a numeric add - and was asymmetric, since 1 + "5"
+		// already failed. Use str(n) to concatenate a number explicitly.
+		if bTypeCode != StringTypeCode {
+			return nil, errors.ErrUnsupported
+		}
 		return aVal + bVal, nil
 	case OpEqual:
 		return aVal == bVal, nil

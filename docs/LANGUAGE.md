@@ -39,6 +39,7 @@ separately in the standard library guide.
 | Nil | `nil` | Reserved word. |
 | List | `[1, 2, 3]`, `[]` | Ordered, mixed-type. |
 | Map | `{a: 1, "b": 2}`, `{}` | Keys are a bare identifier or a string literal — not an arbitrary expression. |
+| Regex | `` re`^\d+$` `` | A regular expression (Go RE2 syntax), compiled when the expression is compiled — see [`in` and `matches`](#in-and-matches). Raw: no escape processing, so `\d` is written once, not `\\d`. Can't contain a backtick (match one with `\x60`). |
 
 There's no hex or scientific notation, no digit separators (`1_000`), and no
 string interpolation — build strings with `+` (see [Operators](#operators)).
@@ -111,10 +112,14 @@ division by zero instead of panicking. `**` is exponentiation and is
 right-associative, so `2 ** 3 ** 2` is `2 ** (3 ** 2)` = `512`. Ordinary
 precedence rules apply across operators too: `2 * 3 ** 2` is `18`, not `36`.
 
-**`+` on strings concatenates**, and stringifies a trailing number for you:
+**`+` on strings concatenates**, but only string with string. Mixing a
+string and a number is an error in either order, so a mistake such as
+`"5" + 1` fails instead of silently producing `"51"`. Convert the number
+explicitly with `str()`:
 
 ```
-"score: " + 42     // "score: 42"
+"score: " + str(42)   // "score: 42"
+"score: " + 42        // error
 ```
 
 **Comparisons** (`== != < > <= >=`) work across numeric types the same way
@@ -259,16 +264,33 @@ negation — both are equivalent:
 !("admin" in user.roles)
 ```
 
-`matches` tests a string against a regular expression. The pattern must be
-a string **literal** — it's compiled once when the expression is compiled,
-not on every run, which also means it can't come from a variable:
+`matches` tests a string against a regular expression. The pattern is
+written as a regex literal, `` re`...` ``, or as a string literal — either
+way it's compiled once, when the expression is compiled, not on every run,
+and an invalid pattern is a compile error:
 
 ```
-email matches "^[^@]+@[^@]+$"
+email matches re`^[^@]+@[^@]+$`
+code matches "^[A-Z]+-[0-9]+$"
 ```
 
-The match is unanchored unless the pattern itself anchors with `^`/`$`, so
-`"prefix-code" matches "code"` is `true`.
+Prefer `` re`...` ``: its body is raw, so regex escapes like `\d` and `\.` are
+written once — in a string literal they'd need doubling (`"\\d"`).
+
+A regex literal is also an ordinary value, so it can be bound with `let`
+and reused, or passed to the `regex.*` functions in the standard library
+(capture groups, find, replace, split):
+
+```
+let id = re`^[A-Z]+-\d+$`;
+filter(codes, c => c matches id)
+```
+
+The right-hand side of `matches` can be any expression that produces a
+regex value — a `let` binding, or one the application provides — but a
+pattern can never be built from a string at run time: `x matches someString`
+is a runtime error. The match is unanchored unless the pattern itself
+anchors with `^`/`$`, so `` "prefix-code" matches re`code` `` is `true`.
 
 ## Comments
 
@@ -302,8 +324,8 @@ application can disable them, but by default they're on):
 ## Built-in types
 
 The core language understands: `int`, `int64`, `float64`, `string`, `bool`,
-`nil`, list, map, and function (a lambda, or any callable value from the
-environment). Any Go value from the environment — a struct, slice, or map
+`nil`, list, map, regex (from a `` re`...` `` literal), and function (a
+lambda, or any callable value from the environment). Any Go value from the environment — a struct, slice, or map
 not already covered above — is also usable directly wherever a value of its
 shape is expected.
 

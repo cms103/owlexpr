@@ -16,6 +16,12 @@ import (
 // RegisterOperation's own doc comment for why a single handler covers
 // both the binary and unary ops), and the TypeCode-driven fast
 // slice-iteration path used by map/filter/reduce over a []decimal.Decimal.
+// Its one function, decimal(), is a top-level builtin rather than a
+// `decimal.*` namespace member: it's written so often in money-handling
+// expressions that `decimal.decimal(x)` was a real burden. It keeps the
+// full name rather than something shorter like dec() because `decimal`
+// was already the pack's reserved name, so it's far less likely to be
+// shadowed by (or to shadow) an env value or let binding.
 //
 // Because decimal.Decimal is registered here rather than being a core VM
 // type, the core string handler's own coercion list has no reason to
@@ -42,7 +48,7 @@ func DecimalBuiltins() vm.VMOption {
 		}
 
 		// Now register our decimal() function
-		mc.RegisterNamespacedBuiltin("decimal", "decimal", decimalFunc)
+		mc.RegisterBuiltin("decimal", decimalFunc)
 		return nil
 	}
 }

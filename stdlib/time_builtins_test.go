@@ -419,3 +419,42 @@ func TestMonthWeekdayComparisons(t *testing.T) {
 		t.Errorf(`str(t.Month()) = %v, want "June"`, got)
 	}
 }
+
+// TestRegisteredIntKindResultsNotNormalised checks that the VM's call-
+// boundary normalisation of unmodelled integer kinds leaves types with a
+// registered operation alone: time.Duration and time.Month are int kinds
+// underneath but must keep their own type once TimeBuiltins is enabled.
+func TestRegisteredIntKindResultsNotNormalised(t *testing.T) {
+	start := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	env := map[string]any{"start": start, "end": start.Add(90 * time.Minute)}
+	if got, ok := evalTime(t, env, `end.Sub(start)`).(time.Duration); !ok || got != 90*time.Minute {
+		t.Errorf("end.Sub(start) = %v (%T), want time.Duration 1h30m", got, got)
+	}
+	if got, ok := evalTime(t, env, `start.Month()`).(time.Month); !ok || got != time.June {
+		t.Errorf("start.Month() = %v (%T), want time.June", got, got)
+	}
+}
+
+// TestMultiValueTimeMethodsReturnLists covers time.Time methods with
+// several results (ISOWeek, Date, Clock, Zone), which the VM returns as a
+// list - each element keeping its registered type, e.g. time.Month.
+func TestMultiValueTimeMethodsReturnLists(t *testing.T) {
+	env := map[string]any{"t": time.Date(2024, 6, 15, 10, 7, 30, 0, time.UTC)}
+	cases := []struct {
+		input string
+		want  any
+	}{
+		{`t.ISOWeek()[0]`, int(2024)},
+		{`t.ISOWeek()[1]`, int(24)},
+		{`t.Date()[1]`, time.June},
+		{`t.Date()[2]`, int(15)},
+		{`t.Clock()[1]`, int(7)},
+		{`t.Zone()[0]`, "UTC"},
+		{`t.Zone()[1]`, int(0)},
+	}
+	for _, c := range cases {
+		if got := evalTime(t, env, c.input); got != c.want {
+			t.Errorf("%s = %v (%T), want %v (%T)", c.input, got, got, c.want, c.want)
+		}
+	}
+}

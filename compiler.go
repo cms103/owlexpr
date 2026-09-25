@@ -2,7 +2,6 @@ package owlexpr
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/cms103/owlexpr/vm"
 )
@@ -29,7 +28,7 @@ func Compile(expression string) ([]vm.Instruction, error) {
 // compiler walks an AST and emits vm.Instructions. Its state beyond the
 // instructions being built is err - added for "matches", the first
 // construct this compiler can fail on for a genuinely user-facing reason
-// (an invalid regex literal or a non-literal pattern), as opposed to the
+// (an invalid regex literal, or a `matches` pattern that can never be a regex), as opposed to the
 // panics used elsewhere for AST shapes the parser should never produce -
 // and locals, the compile-time mirror of lexical scope described below.
 // It's used internally - once per top-level Compile call, plus one per
@@ -123,6 +122,18 @@ func (c *compiler) resolveLocal(name string) (depth, slot int, ok bool) {
 	return 0, 0, false
 }
 
+// compileRegex compiles a regex literal's pattern (from re`...` or a
+// string literal on the right of `matches`) at Compile() time, recording
+// an invalid pattern as c.err.
+func (c *compiler) compileRegex(pattern string) *vm.Regex {
+	re, err := vm.CompileRegex(pattern)
+	if err != nil {
+		c.err = fmt.Errorf("invalid regex literal %q: %w", pattern, err)
+		return nil
+	}
+	return re
+}
+
 func (c *compiler) compile(node Expr) {
 	if c.err != nil {
 		return
@@ -133,6 +144,13 @@ func (c *compiler) compile(node Expr) {
 
 	case StringNode:
 		c.instructions = append(c.instructions, vm.Instruction{Op: vm.OpPush, Arg: n.Value})
+
+	case RegexNode:
+		re := c.compileRegex(n.Pattern)
+		if c.err != nil {
+			return
+		}
+		c.instructions = append(c.instructions, vm.Instruction{Op: vm.OpPush, Arg: re})
 
 	case BoolNode:
 		c.instructions = append(c.instructions, vm.Instruction{Op: vm.OpPush, Arg: n.Value})
@@ -285,33 +303,37 @@ func (c *compiler) compile(node Expr) {
 			return
 		}
 
-		// "matches": the right-hand side must be a string literal, compiled
-		// once here (at Compile() time) into a real *regexp.Regexp embedded
-		// directly as an OpPush constant - never emitted as its own
-		// runtime instructions the way an ordinary operand would be. This
-		// is what makes the operator cache-free: the same *regexp.Regexp
-		// value is reused, already compiled, every time this instruction
-		// stream runs. A non-literal right-hand side (a variable, a call,
-		// any other expression) is rejected here, at compile time, rather
-		// than accepted as a slower runtime-compiled path - see
-		// DESIGN_NOTES.md's "matches" writeup for why that's deliberate,
-		// not a missing feature.
+		// "matches": a string or regex literal right-hand side is compiled
+		// once here (at Compile() time) into a *vm.Regex embedded directly
+		// as an OpPush constant - the same *vm.Regex value is reused,
+		// already compiled, every time this instruction stream runs, so
+		// the operator is cache-free. Any other non-literal right-hand
+		// side (a let-bound regex, an env value) compiles normally but
+		// must evaluate to a *vm.Regex at run time - a plain string there
+		// is a runtime error, never compiled on the fly (see matchesValue).
+		// A literal that can never be a regex (a number, bool, nil, list,
+		// map or lambda) is rejected here, since it's certain to fail.
+		// See DESIGN_NOTES.md's "matches" writeup for why dynamic patterns
+		// are deliberately not supported.
 		if n.Op == "matches" {
-			strNode, ok := n.Right.(StringNode)
-			if !ok {
-				c.err = fmt.Errorf("right-hand side of 'matches' must be a string literal, got %T", n.Right)
+			switch right := n.Right.(type) {
+			case StringNode:
+				re := c.compileRegex(right.Value)
+				if c.err != nil {
+					return
+				}
+				c.compile(n.Left)
+				c.instructions = append(c.instructions, vm.Instruction{Op: vm.OpPush, Arg: re})
+			case NumberNode, BoolNode, NilNode, ListNode, MapNode, LambdaNode:
+				c.err = fmt.Errorf("right-hand side of 'matches' must be a string or regex literal, or a regex value, got %T", n.Right)
 				return
+			default:
+				c.compile(n.Left)
+				c.compile(n.Right)
 			}
-			re, err := regexp.Compile(strNode.Value)
-			if err != nil {
-				c.err = fmt.Errorf("invalid regex literal %q: %w", strNode.Value, err)
-				return
-			}
-			c.compile(n.Left)
 			if c.err != nil {
 				return
 			}
-			c.instructions = append(c.instructions, vm.Instruction{Op: vm.OpPush, Arg: re})
 			c.instructions = append(c.instructions, vm.Instruction{Op: vm.OpMatches})
 			return
 		}

@@ -77,6 +77,8 @@ res, _ := owlexpr.RunSheet(mc, sheet, map[string]any{"x": int64(1)})
 // res["y"] == int64(101)                 - env x (1) + cell x (100)
 ```
 
+`sheet["name"]` (or `sheet?.["name"]`) is the same reference written with brackets, handy for a cell name that isn't a valid identifier. The key must be a constant string. A computed key such as `sheet[k]` is rejected by `CompileSheet`: which cell it reads can't be known until it runs, and at run time a cell only sees the cells it was found to depend on, so it could never succeed.
+
 A local name that happens to be spelled `sheet` - a `let sheet = ...` binding, or a lambda parameter named `sheet` - shadows the reserved namespace inside its own scope exactly the way any other `let`/lambda binding would, rather than being misread as a cross-cell reference: `let sheet = {"x": 999}; sheet.x` inside a cell body reads the local map, not another cell.
 
 ### Order doesn't matter - only dependencies do
@@ -102,6 +104,10 @@ Every cell is parsed and its cross-cell references checked at `CompileSheet` tim
 - **`sheet.<name>` referencing a cell that doesn't exist** - caught as a compile-time typo, not a runtime surprise:
   ```
   cell "a": sheet.doesNotExist references a cell that does not exist
+  ```
+- **`sheet[...]` with a computed key**, e.g. `sheet[k]` (see above):
+  ```
+  cell "b": sheet[...] must use a constant string, e.g. sheet["name"]: a cell name computed at run time can't be resolved when the sheet is compiled
   ```
 - **A dependency cycle**, direct self-reference included, named explicitly in the error:
   ```
@@ -146,6 +152,23 @@ result, _ := scaler(int64(21)) // == int64(42)
 ```
 
 This is safe to call even well after `RunSheet` has returned and other cells have run - each cell's own dependency map is allocated fresh and never touched again once that cell finishes, so a closure it returns keeps seeing exactly the values it closed over.
+
+## Finding references without compiling a sheet
+
+`SheetReferences(expression, namespace string) ([]string, error)` runs the same reference analysis `CompileSheet` uses, on a single expression, and returns the cell names it reads, sorted and de-duplicated. It's for hosts that manage the dependency graph themselves, e.g. a data pipeline that needs to know which upstream outputs a step's expression reads before scheduling it:
+
+```go
+refs, err := owlexpr.SheetReferences(`sheet.taxable + sheet.tax`, "")
+// refs == []string{"tax", "taxable"}
+
+refs, err = owlexpr.SheetReferences(`stage.clean.count > 0 ? stage.total : 0`, "stage")
+// refs == []string{"clean", "total"}  (only the first member after the namespace counts)
+```
+
+- `namespace` is the identifier references go through. `""` means the default, `"sheet"`. Anything else must be a single identifier and not a reserved word, the same rule as the `Namespace` option.
+- It follows `CompileSheet`'s rules exactly. A `let` name or lambda parameter that shadows the namespace isn't a reference, and a bare `sheet` with no member (e.g. `len(sheet)`) adds nothing, because which cells it reads can't be known without running it.
+- The result is empty, not `nil`, when there are no references.
+- `sheet["name"]` counts the same as `sheet.name`. It returns an error if the expression doesn't parse, the namespace isn't valid, or the expression uses a computed key such as `sheet[k]`. It doesn't check whether the named cells exist, since it only sees one expression.
 
 ## What `Sheet` isn't
 

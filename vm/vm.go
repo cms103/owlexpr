@@ -3,6 +3,7 @@ package vm
 import (
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"uuid"
 )
@@ -1424,8 +1425,15 @@ func WrapCallable(v any) any {
 //     else (nil, nil) - a bare `func(...) error` signals success/failure
 //     only, with no data value
 //   - one other return value -> that value
-//   - two or more, where the LAST one is an error -> (first value, that error)
-//   - two or more otherwise -> just the first value
+//   - two or more, where the LAST one is an error -> the remaining data
+//     value(s), per the two rules below, plus that error
+//   - exactly one data value (e.g. the idiomatic `(T, error)`) -> that value
+//   - two or more data values -> all of them as a []any list, in order, so
+//     e.g. time.Time's ISOWeek() gives [year, week] rather than silently
+//     dropping the week
+//
+// Every data value, including each list element, goes through
+// normaliseResult.
 func callReflectFunc(mc *Machine, fn reflect.Value, args []any) (any, error) {
 	fnType := fn.Type()
 	numIn := fnType.NumIn()
@@ -1491,18 +1499,68 @@ func callReflectFunc(mc *Machine, fn reflect.Value, args []any) (any, error) {
 			}
 			return nil, errVal.(error)
 		}
-		return out[0].Interface(), nil
+		return mc.normaliseResult(out[0]), nil
 	default:
-		last := out[len(out)-1]
-		if last.Type().Implements(errorType) {
-			var err error
+		var err error
+		if last := out[len(out)-1]; last.Type().Implements(errorType) {
 			if !last.IsNil() {
 				err = last.Interface().(error)
 			}
-			return out[0].Interface(), err
+			out = out[:len(out)-1]
 		}
-		return out[0].Interface(), nil
+		if len(out) == 1 {
+			return mc.normaliseResult(out[0]), err
+		}
+		list := make([]any, len(out))
+		for i, v := range out {
+			list[i] = mc.normaliseResult(v)
+		}
+		return list, err
 	}
+}
+
+// normaliseResult converts a Go call's return value into a value owlexpr
+// can actually work with. Go APIs routinely return integer and float kinds
+// owlexpr doesn't model - e.g. a decimal's Exponent() is an int32, a
+// Float32() accessor a float32 - and without this such a value would be
+// opaque to arithmetic, comparisons, int()/float() conversion and output
+// formatting alike. Normalising here, once, at the call boundary fixes all
+// of those in one place: any unmodelled signed/unsigned integer kind
+// becomes int64, any float kind float64.
+//
+// A value whose type the Machine already recognises is left untouched -
+// the core types, and crucially anything with a registered operation
+// (RegisterOperation/RegisterTypeCoder), so time.Duration (int64
+// underneath), time.Month and the like keep their own semantics. A
+// uint64/uint/uintptr too large for int64 is also left as-is rather than
+// silently wrapping negative or losing precision as a float64.
+func (mc *Machine) normaliseResult(rv reflect.Value) any {
+	v := rv.Interface()
+	switch v.(type) {
+	case nil, int, int64, float64, string, bool:
+		return v // fast path: already a core type
+	}
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if mc.typeCode(v) != UnSupportedType {
+			return v
+		}
+		return rv.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if mc.typeCode(v) != UnSupportedType {
+			return v
+		}
+		if u := rv.Uint(); u <= math.MaxInt64 {
+			return int64(u)
+		}
+		return v
+	case reflect.Float32, reflect.Float64:
+		if mc.typeCode(v) != UnSupportedType {
+			return v
+		}
+		return rv.Float()
+	}
+	return v
 }
 
 // makeReflectFuncAdapter bridges a owlexpr callable - a lambda closure,
@@ -1914,7 +1972,11 @@ func (mc *Machine) accessMember(target any, hn HashedName) (any, error) {
 	}
 
 	if val.Kind() == reflect.Struct {
-		if sf, found := val.Type().FieldByName(hn.Name); found {
+		// Unexported fields are treated as absent: reflect refuses to
+		// Interface() them (a panic, not an error), and they're not part
+		// of any type's public surface anyway - e.g. a *Regex's wrapped
+		// *regexp.Regexp must stay unreachable (see Regex's doc comment).
+		if sf, found := val.Type().FieldByName(hn.Name); found && sf.IsExported() {
 			mc.cacheMember(rawType, hn.Name, memberResolution{fieldIndex: sf.Index})
 			field := val.FieldByIndex(sf.Index)
 			switch field.Kind() {
