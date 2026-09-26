@@ -11,7 +11,11 @@ import (
 // pure literal sub-expression (`60 * 60 * 24`) down to a single literal
 // before compilation - see its own doc comment for why that's always
 // safe here, independent of which Machine eventually runs the result.
-func Compile(expression string) ([]vm.Instruction, error) {
+//
+// The result is a vm.Program, a named []vm.Instruction, so it can be used
+// anywhere the plain slice is expected; its Names method reports the names
+// the expression looks up in its environment when it runs.
+func Compile(expression string) (vm.Program, error) {
 	ast, err := Parse(expression)
 	if err != nil {
 		return nil, err

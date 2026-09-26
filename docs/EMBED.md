@@ -175,6 +175,21 @@ out, _ := double(int64(21)) // out == int64(42)
 
 Note: The returned callable is not safe for concurrent use by multiple goroutines or for concurrent use with the Machine that created it.
 
+### Finding the Names an Expression Uses
+
+`Compile` returns a `vm.Program`, whose `Names` method reports the names the expression looks up in its environment when it runs, sorted and de-duplicated:
+
+```go
+ourProgram, _ := owlexpr.Compile(`let limit = max; attributes.Fee ?? round(value * rate) > limit`)
+fmt.Println(ourProgram.Names()) // [attributes max rate round value]
+```
+
+This is useful when building the environment is expensive - for example when running the same expression over many records, only the values an expression actually uses need to be placed into `env`. It can also be used to check, when an expression is saved, that it only refers to names your application provides.
+
+Names bound inside the expression (lambda parameters and `let` names, such as `limit` above) aren't reported, and only the first identifier of a chain is: `attributes.Fee` reports `attributes`. Builtin functions and namespaces are reported alongside variables (`round` above), as which builtins exist depends on the Machine the program is run on - remove any your Machine provides that you don't expect to supply in `env`.
+
+`vm.Program` is a named `[]vm.Instruction`, so it can be used anywhere the plain slice is expected, and existing instructions can be converted with `vm.Program(instructions)`.
+
 ## Minimal Use Case
 
 Expressions can be used for very simple business rule evaluation, e.g. should this order get free shipping: `customer.IsVIP || order.value > 1000`.
