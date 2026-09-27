@@ -5,32 +5,24 @@ import (
 	"testing"
 )
 
-// This file benchmarks RunSheet's own bookkeeping cost - the depsMap/
-// results dance in RunSheet (sheet.go) - separately from the OpLoad/
-// OpAccess instruction-resolution cost already covered by
-// bench_prehash_test.go. Before this change, `results[cell.name] = val`
-// and `depsMap[dep] = results[dep]` each hashed a name via Go's own map
-// hash on every single RunSheet call, even though cell.name and cell.deps
-// are entirely fixed once CompileSheet returns - the same Sheet gets
-// re-run against many different envs (that's RunSheet's whole reason to
-// exist, the same way a compiled []vm.Instruction is meant to be run
-// many times rather than recompiled per call), so that hashing repeated
-// needlessly on every call. compiledCell now precomputes each name's hash
-// once, at CompileSheet time, and RunSheet's internal `results` uses
-// vm.PrehashedMap keyed by those hashes instead.
+// This file benchmarks RunSheet's and RunSheetInto's own bookkeeping cost
+// against a fixed, reusable Sheet, separately from the OpLoad/OpAccess
+// instruction-resolution cost already covered by bench_prehash_test.go.
+// (The file name is historical: a PrehashedMap-keyed results map was
+// tried here and measured slower than a plain map[string]any.)
 //
-// Two shapes, since dependency fan-in is what actually stresses the
-// bookkeeping this change targets:
+// Two synthetic shapes, since dependency fan-in is what stresses
+// cross-cell reads:
 //   - Chain: each cell depends on exactly the one before it - the
 //     minimum possible dependency load per cell.
-//   - WideDeps: each cell depends on the 4 cells before it - 4x the
-//     depsMap/results traffic per cell, closer to a real spreadsheet
-//     where a summary cell references several inputs.
+//   - WideDeps: each cell depends on the 4 cells before it, closer to a
+//     real spreadsheet where a summary cell references several inputs.
 //
-// Both build the Sheet once outside the timed loop (CompileSheet's own
-// cost, including the now one-time HashName calls, is deliberately
-// excluded) and reuse one Machine, so what's measured is purely
-// RunSheet's per-call cost against a fixed, reusable Sheet.
+// plus Record, a small Sheet shaped like a pipeline mapping node's.
+//
+// Each builds the Sheet once outside the timed loop (CompileSheet's own
+// cost is deliberately excluded) and reuses one Machine, so what's
+// measured is purely the per-call cost.
 
 const sheetBenchCellCount = 200
 
@@ -110,4 +102,89 @@ func BenchmarkRunSheetWideDeps(b *testing.B) {
 		}
 		sink = res
 	}
+}
+
+// The RunSheetInto variants measure the same Sheets without RunSheet's
+// result map, reusing one out slice across calls the way an engine
+// running a Sheet per record would.
+
+func benchRunSheetInto(b *testing.B, sheet *Sheet, env map[string]any) {
+	mc, err := NewVM()
+	if err != nil {
+		b.Fatal(err)
+	}
+	out := make([]any, sheet.Len())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := RunSheetInto(mc, sheet, env, out); err != nil {
+			b.Fatal(err)
+		}
+	}
+	sink = out
+}
+
+func BenchmarkRunSheetIntoChain(b *testing.B) {
+	benchRunSheetInto(b, buildChainSheet(b), map[string]any{"base": int64(1)})
+}
+
+func BenchmarkRunSheetIntoWideDeps(b *testing.B) {
+	benchRunSheetInto(b, buildWideDepsSheet(b), map[string]any{"base": int64(1)})
+}
+
+// buildRecordSheet is a Sheet shaped like a pipeline mapping node's: 15
+// cells mixing env reads, cross-cell references, string concatenation and
+// a lambda that reads another cell.
+func buildRecordSheet(b *testing.B) *Sheet {
+	b.Helper()
+	sheet, err := CompileSheet([]CellDef{
+		{Name: "qty", Expression: "rec.qty"},
+		{Name: "price", Expression: "rec.price"},
+		{Name: "net", Expression: "sheet.qty * sheet.price"},
+		{Name: "rate", Expression: "rec.region == \"EU\" ? 20 : 10"},
+		{Name: "tax", Expression: "sheet.net * sheet.rate / 100"},
+		{Name: "gross", Expression: "sheet.net + sheet.tax"},
+		{Name: "big", Expression: "sheet.gross > 1000"},
+		{Name: "discount", Expression: "sheet.big ? sheet.gross / 10 : 0"},
+		{Name: "total", Expression: "sheet.gross - sheet.discount"},
+		{Name: "name", Expression: "rec.name"},
+		{Name: "label", Expression: "sheet.name + \" (\" + rec.region + \")\""},
+		{Name: "lines", Expression: "map(rec.lines, l => l * sheet.rate)"},
+		{Name: "lineCount", Expression: "len(sheet.lines)"},
+		{Name: "flag", Expression: "sheet.lineCount > 2 and sheet.big"},
+		{Name: "summary", Expression: "sheet.flag ? sheet.label : rec.name"},
+	})
+	if err != nil {
+		b.Fatalf("CompileSheet: %v", err)
+	}
+	return sheet
+}
+
+func recordSheetEnv() map[string]any {
+	return map[string]any{"rec": map[string]any{
+		"qty": int64(12), "price": int64(99), "region": "EU", "name": "widget",
+		"lines": []any{int64(1), int64(2), int64(3)},
+	}}
+}
+
+func BenchmarkRunSheetRecord(b *testing.B) {
+	sheet := buildRecordSheet(b)
+	mc, err := NewVM()
+	if err != nil {
+		b.Fatal(err)
+	}
+	env := recordSheetEnv()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := RunSheet(mc, sheet, env)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sink = res
+	}
+}
+
+func BenchmarkRunSheetIntoRecord(b *testing.B) {
+	benchRunSheetInto(b, buildRecordSheet(b), recordSheetEnv())
 }

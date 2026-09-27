@@ -25,13 +25,11 @@ type CellDef struct {
 	Expression string
 }
 
-// cellDep is one dependency edge, resolved once at CompileSheet time to
-// the depended-on cell's fixed position in Sheet.cells (see RunSheet's own
-// doc comment for why an index, not a name or even a precomputed hash, is
-// the right representation here).
+// cellDep is one dependency edge, resolved once at CompileSheet time.
+// RunSheetInto doesn't need it - every cell reads upstream results from
+// one shared map - but it records what CompileSheet found.
 type cellDep struct {
-	name  string
-	index int
+	name string
 }
 
 // compiledCell is a CellDef after CompileSheet has parsed it, resolved its
@@ -47,15 +45,36 @@ type compiledCell struct {
 // execution order has already been resolved from their cross-references to
 // each other - the same relationship Compile's []vm.Instruction has to a
 // single expression string. cells is stored in resolved (dependency-first)
-// order.
+// order, and a cell's position there is its slot in RunSheetInto's out
+// slice.
 type Sheet struct {
 	cells     []compiledCell
+	index     map[string]int
 	namespace string
+}
+
+// Len reports the number of cells in s: the length RunSheetInto's out
+// slice must have.
+func (s *Sheet) Len() int {
+	return len(s.cells)
+}
+
+// Name returns the name of the cell in slot i, 0 <= i < Len(). Slots are
+// in evaluation (dependency-first) order, not the order the cells were
+// given to CompileSheet.
+func (s *Sheet) Name(i int) string {
+	return s.cells[i].name
+}
+
+// Index returns the slot of the cell called name, and whether there is one.
+func (s *Sheet) Index(name string) (int, bool) {
+	i, ok := s.index[name]
+	return i, ok
 }
 
 type SheetOption func(*Sheet) error
 
-// Namespace overrides the reserved identifier CompileSheet/RunSheet use for
+// Namespace overrides the reserved identifier CompileSheet/RunSheetInto use for
 // cross-cell references (`<namespace>.<name>`) - "sheet" by default (see
 // defaultSheetNamespace). name must lex as a single identifier and must not
 // be a language keyword (if, else, let, true, false, nil, and, or, in, not,
@@ -67,7 +86,7 @@ type SheetOption func(*Sheet) error
 // Machine RunSheet is later called with (e.g. "string", "json") can't be
 // checked here - CompileSheet has no Machine to check against - and will
 // silently shadow that builtin for every cell in the sheet, since
-// env/cellScope lookup takes priority over builtins (see OpLoad, vm/vm.go).
+// scope lookup takes priority over builtins (see OpLoad, vm/vm.go).
 // Pick a name unlikely to collide with any namespace your builtins
 // register.
 func Namespace(name string) SheetOption {
@@ -164,20 +183,20 @@ func CompileSheet(cells []CellDef, options ...SheetOption) (*Sheet, error) {
 		return nil, err
 	}
 
-	// nameToIndex maps a cell name to its final position in sheet.cells -
-	// well-defined by the time a dependent cell needs it, since order is
-	// dependency-first (topoSortCells' own guarantee): every dependency of
-	// "name" was already appended, and so already has an entry here,
-	// before "name" itself is processed below.
+	// nameToIndex maps a cell name to its final position in sheet.cells,
+	// for Sheet.Index.
 	nameToIndex := make(map[string]int, len(cells))
 
 	for _, name := range order {
 		c := &compiler{}
 		c.compile(asts[name])
+		if c.err != nil {
+			return nil, fmt.Errorf("cell %q: %w", name, c.err)
+		}
 		cellDeps := deps[name]
 		resolvedDeps := make([]cellDep, len(cellDeps))
 		for i, dep := range cellDeps {
-			resolvedDeps[i] = cellDep{name: dep, index: nameToIndex[dep]}
+			resolvedDeps[i] = cellDep{name: dep}
 		}
 		nameToIndex[name] = len(sheet.cells)
 		sheet.cells = append(sheet.cells, compiledCell{
@@ -186,6 +205,7 @@ func CompileSheet(cells []CellDef, options ...SheetOption) (*Sheet, error) {
 			deps:         resolvedDeps,
 		})
 	}
+	sheet.index = nameToIndex
 	return sheet, nil
 }
 
@@ -254,76 +274,80 @@ func joinCycle(names []string) string {
 }
 
 // RunSheet evaluates every cell of sheet against mc in dependency order,
-// seeded by env, and returns each cell's result keyed by name. env itself
-// is never mutated or copied - each cell instead sees a small, freshly
-// allocated map holding only the upstream cell results it actually depends
-// on, exposed under the reserved "sheet" name (RunScopes, vm/vm.go, layers
-// it under env so `sheet.x` resolves via the same generic map-dot-access
-// accessMember already gives any string-keyed map). Cost per cell is O(that
-// cell's dependency count), independent of both env's size and the sheet's
-// total cell count. That freshness matters beyond cost: a cell whose result
-// is (or contains) a closure captures a reference to this map, and it's
-// never touched again after the cell's RunScopes call returns - mutating a
-// shared map across cells would silently corrupt an already-escaped
-// closure's captured scope, the same aliasing hazard closure.call and
-// let's binding scope already avoid by never mutating a scope map after
-// it's handed to a closure. Fails fast: the first cell to error stops
-// execution and its error (wrapped with the cell's name) is returned, with
-// no partial results. Returns an error without running anything if env
-// already defines "sheet" - RunSheet refuses to silently shadow it.
-//
-// results (as opposed to out, the returned map[string]any) is a plain
-// []any indexed by each cell's fixed position in sheet.cells (see
-// cellDep's own doc comment) rather than a second string-keyed map
-// alongside out: a first attempt at this speedup kept results as a
-// vm.PrehashedMap keyed by each cell's precomputed name hash, on the
-// theory that trading a rehash for a uint64 probe would be a pure win the
-// same way it was for Machine.builtins/namespaces (see
-// vm/prehashed_map.go) - but benchmarking it (bench_sheet_prehash_test.go)
-// showed a regression, not a win: unlike Machine.builtins/namespaces,
-// which are populated once and read for the Machine's whole life, results
-// here is a fresh map built and torn down every single RunSheet call, so
-// every cell's PrehashedMap insert paid for a new backing bucket slice
-// allocation that a plain map[string]any's own preallocated buckets don't
-// need - swapping a few nanoseconds of hashing for a heap allocation per
-// cell. Since cell.deps is resolved to each dependency's fixed index at
-// CompileSheet time, results doesn't need to be keyed by anything at
-// all - one []any of len(sheet.cells), one allocation total per RunSheet
-// call - is both simpler and faster than either map form. depsMap itself
-// still has to be a plain map[string]any (RunScopes takes
-// []map[string]any), so populating it still pays one native hash per
-// dependency; that part is unavoidable without changing the VM's scope
-// representation, which vm/vm.go's own doc comment on this decision
-// covers.
-//
-// results and out deliberately diverge on one thing: a cell result that's
-// a lambda closure is kept raw in results, since a later cell may still
-// need to call it the normal internal way via `sheet.<name>` (see
-// RunScopes' own doc comment for why RunScopes itself never wraps its
-// result), but out - what actually reaches RunSheet's caller - passes
-// each value through vm.WrapCallable first, the same conversion Run
-// applies to its own result, so a cell whose value is a lambda hands the
-// caller an ordinary callable Go func instead of owlexpr's internal
-// closure representation.
+// seeded by env, and returns each cell's result keyed by name. It's
+// RunSheetInto plus building that map; see RunSheetInto for the details,
+// including errors. A caller running the same Sheet over many envs should
+// use RunSheetInto directly and skip the map.
 func RunSheet(mc *vm.Machine, sheet *Sheet, env map[string]any) (map[string]any, error) {
-	if _, exists := env[sheet.namespace]; exists {
-		return nil, fmt.Errorf("run sheet: env already defines %q, which collides with the reserved cell-reference namespace", sheet.namespace)
+	values := make([]any, len(sheet.cells))
+	if err := RunSheetInto(mc, sheet, env, values); err != nil {
+		return nil, err
 	}
-
-	results := make([]any, len(sheet.cells))
 	out := make(map[string]any, len(sheet.cells))
-	for i, cell := range sheet.cells {
-		depsMap := make(map[string]any, len(cell.deps))
-		for _, dep := range cell.deps {
-			depsMap[dep.name] = results[dep.index]
-		}
-		cellScope := map[string]any{sheet.namespace: depsMap}
-		val, err := mc.RunScopes(cell.instructions, []map[string]any{env, cellScope})
-		if err != nil {
-			return nil, fmt.Errorf("cell %q: %w", cell.name, err)
-		}
-		results[i] = val
-		out[cell.name] = vm.WrapCallable(val)
+	for i := range sheet.cells {
+		out[sheet.cells[i].name] = values[i]
 	}
 	return out, nil
+}
+
+// RunSheetInto evaluates every cell of sheet against mc in dependency
+// order, seeded by env, and stores cell i's result in out[i] - the cell
+// sheet.Name(i). out must have length sheet.Len(), and may be reused
+// across calls: nothing RunSheetInto leaves behind refers to it. env
+// itself is never mutated or copied.
+//
+// Every cell runs against the same two-layer scope chain: env, under a
+// scope binding the namespace ("sheet" by default) to a results map that
+// each cell's value is added to once it has run. RunScopes (vm/vm.go)
+// layers it over env so `sheet.x` resolves via the same generic
+// map-dot-access accessMember already gives any string-keyed map. The
+// map, the scope holding it and the scope chain are allocated once per
+// call, not per cell, so a cell costs nothing beyond its own evaluation
+// and one map insert.
+//
+// Sharing one map across cells is safe for the reason the per-cell maps
+// used before this were fresh: a cell whose result is (or contains) a
+// closure captures the map, and must keep seeing the values it was
+// created with. Within a call, an entry is only ever added - a cell's
+// result is written once, after it runs, and never changed - and every
+// `sheet.<name>` a cell contains is a dependency CompileSheet ordered
+// before it, so every read, however late a closure makes it, sees the
+// value that was there when the reading cell ran. Across calls, nothing
+// is shared: each call makes a new map. A cell that uses the namespace
+// as a whole value (`len(sheet)`) sees every cell that has run so far,
+// not just its dependencies - that isn't something callers can rely on.
+//
+// The map keeps each result raw, since a later cell may still need to
+// call a lambda-valued cell the normal internal way via `sheet.<name>`
+// (see RunScopes' own doc comment for why RunScopes itself never wraps
+// its result), but what reaches out is passed through vm.WrapCallable -
+// the same conversion Run applies to its own result - so a cell whose
+// value is a lambda hands the caller an ordinary callable Go func instead
+// of owlexpr's internal closure representation.
+//
+// Fails fast: the first cell to error stops execution and its error
+// (wrapped with the cell's name, as `cell "name": ...`) is returned. out
+// then holds partial results and should be discarded. Returns an error
+// without running anything if env already defines the namespace -
+// RunSheetInto refuses to silently shadow it.
+func RunSheetInto(mc *vm.Machine, sheet *Sheet, env map[string]any, out []any) error {
+	if len(out) != len(sheet.cells) {
+		return fmt.Errorf("run sheet: out has length %d, but the sheet has %d cells", len(out), len(sheet.cells))
+	}
+	if _, exists := env[sheet.namespace]; exists {
+		return fmt.Errorf("run sheet: env already defines %q, which collides with the reserved cell-reference namespace", sheet.namespace)
+	}
+
+	results := make(map[string]any, len(sheet.cells))
+	scopes := []map[string]any{env, {sheet.namespace: results}}
+	for i := range sheet.cells {
+		cell := &sheet.cells[i]
+		val, err := mc.RunScopes(cell.instructions, scopes)
+		if err != nil {
+			return fmt.Errorf("cell %q: %w", cell.name, err)
+		}
+		results[cell.name] = val
+		out[i] = vm.WrapCallable(val)
+	}
+	return nil
 }

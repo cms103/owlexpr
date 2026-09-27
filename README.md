@@ -117,7 +117,7 @@ func main() {
 
 ▶ [Run this on the Go Playground](https://go.dev/play/p/QNu2Y2-sjqZ)
 
-`total` is derived from `discount`, which is derived from `subtotal` - `CompileSheet` works that ordering out from the `sheet.*` references itself, and `RunSheet` returns every cell's result, not just the last one, so a caller can inspect `subtotal`/`discount` individually rather than only seeing the final `total`.
+`total` is derived from `discount`, which is derived from `subtotal` - `CompileSheet` works that ordering out from the `sheet.*` references itself, and `RunSheet` returns every cell's result, not just the last one, so a caller can inspect `subtotal`/`discount` individually rather than only seeing the final `total`. A caller running the same Sheet over many inputs can use `RunSheetInto` instead, which fills a reusable `[]any` in `sheet.Name(i)` order and skips building the result map.
 
 
 ## Background and motivation

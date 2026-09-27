@@ -271,8 +271,8 @@ func TestSheetResultMapWrapsLambdaCellAsCallableFunc(t *testing.T) {
 // OptMemberAccessNode had no case in its AST walk (sheet_refs.go) and fell
 // through to the "unhandled node type" default. b is declared before a, so
 // this also confirms sheet.a?.field records the same dependency edge
-// sheet.a.field would - sheet is never nil (RunSheet injects it fresh per
-// cell), so the ?. can only ever matter for the field, never for reaching
+// sheet.a.field would - sheet is never nil (RunSheetInto injects it for
+// every cell), so the ?. can only ever matter for the field, never for reaching
 // the right cell first.
 func TestSheetOptMemberAccessRecordsDependency(t *testing.T) {
 	sheet, err := CompileSheet([]CellDef{

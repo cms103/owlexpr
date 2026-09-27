@@ -144,8 +144,8 @@ func collectSheetReferences(expr Expr, namespace string, bound map[string]bool, 
 		collectSheetReferences(n.Expr, namespace, bound, c)
 
 	case OptMemberAccessNode:
-		// sheet is always a non-nil map (RunSheet injects it fresh per
-		// cell, even when a cell has zero dependencies), so `sheet?.x`
+		// sheet is always a non-nil map (RunSheetInto injects it for
+		// every cell, even one with zero dependencies), so `sheet?.x`
 		// behaves exactly like `sheet.x` at runtime - accessMember still
 		// runs and still needs x's dependency edge recorded, the ?.
 		// short-circuit only ever fires here for a genuinely nil target.
